@@ -38,23 +38,7 @@ Reject invalid transitions with **409**.
 
 ## Repository layout
 
-```
-final-project/
-├── README.md                  # how to build, run and demo
-├── docker-compose.yml         # local stack: all services + rabbitmq + 6 storage nodes
-├── services/
-│   ├── common/                # shared: models, shard hash, http helpers, config
-│   ├── storage_node/          # KV store + heartbeat client
-│   ├── coordinator/           # routing, node registry, failover, fan-out query
-│   ├── request_service/       # public REST API + publisher
-│   └── matching_service/      # RabbitMQ consumer + match logic (+ HTTP /match)
-├── k8s/                       # Deployments, Services, StatefulSets, ConfigMaps
-├── scripts/                   # seed data, demo scripts (failure, scaling, load)
-├── tests/                     # unit + integration tests
-└── docs/                      # DESIGN.md, BUILD_PLAN.md, RESUME_ROADMAP.md
-```
-
-Use the **repo root as the Docker build context** so each service's Dockerfile can `COPY services/common`.
+The full file-by-file structure, with an owner for every file, is in **`DESIGN.md` section 9**. Use the **repo root as the Docker build context** so each service's Dockerfile can `COPY services/common`.
 
 ## Phase 2: Storage node (days 2–4)
 
@@ -110,18 +94,33 @@ Use the **repo root as the Docker build context** so each service's Dockerfile c
 
 ---
 
-## Team split (adjust to team size)
+## Team split (2 people)
 
-| Person | Owns |
-|---|---|
-| A | Storage node + coordinator (sharding, replication, heartbeats, recovery) |
-| B | Request service + RabbitMQ setup + API errors and validation |
-| C | Matching service (consumer, matching algorithm, claim/CAS, DLQ) |
-| D | Docker Compose, Kubernetes manifests, demo scripts, README, integration tests |
+The project splits cleanly into two halves that meet at the **coordinator API** (`DESIGN.md` section 8):
 
-Person A is on the critical path. A **stub coordinator** (a single in-memory dict behind the same API) on day 2 lets B and C build in parallel before real sharding exists.
+| | **Person A: storage side** | **Person B: app side** |
+|---|---|---|
+| Programs | Storage node, coordinator | Request service, matching service, client script |
+| Ready-made pieces | – | RabbitMQ setup (exchange, queue, DLQ) |
+| Spec features | Sharding, replicas, heartbeats, failover, recovery sync | Client REST API, async processing, matching, "only if still free" claiming |
+| Docker | Dockerfiles for storage node and coordinator | Dockerfiles for request and matching services, **docker-compose.yml** |
+| Kubernetes | StatefulSets + headless Services for the 3 shards, coordinator Deployment | Deployments + Services for the apps and RabbitMQ, scaling and pod-recovery demos |
+| Demos | Data distribution, storage failure, node recovery | Create/retrieve, register, matching, many requests via RabbitMQ, Kubernetes recovery and scaling |
+| Tests | Shard rule, replication, failover, resync | Validation, status transitions, matching rule, concurrent matching |
+| Shared | `services/common/` (record shapes, shard rule), README, `DESIGN.md` | same |
+
+**Rules that keep two people from blocking each other:**
+- **Day 1, together:** agree on `DESIGN.md` and write `services/common/` (record shapes, fixed lists, shard rule).
+- **Day 1–2, Person A:** ship a **fake coordinator**, an in-memory dictionary behind the exact coordinator API. Person B builds against it while A builds the real one.
+- Each person works only in their own folders (`services/storage_node` + `services/coordinator` for A; `services/request_service` + `services/matching_service` for B), so merge conflicts are rare.
+- One branch per feature, and a pull request that **the other person reviews** before merging. Both of you end up understanding the whole system, which you'll need for the viva/demo.
+- A 10-minute check-in every day or two.
+
+**Sync points:**
+1. **End of week 1:** swap the fake coordinator for the real one and run the full flow in Docker Compose.
+2. **End of week 2:** all failure handling works in Compose (storage node stop/start, concurrent matching).
+3. **Week 3:** Kubernetes, demo scripts, README. Rehearse the full demo together at least once.
 
 ## Open questions for the team
 - What is the submission deadline? The day numbers above assume about 3 weeks.
-- How many people are on the team?
 - Will the demo be live or recorded? A recording lets the failure demos be edited down.
