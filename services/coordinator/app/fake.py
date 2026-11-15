@@ -154,6 +154,18 @@ def status() -> dict[str, Any]:
     return {"mode": "fake", "nodes": nodes, "keys_per_shard": keys_per_shard, "total_keys": len(keys)}
 
 
+@app.post("/internal/nodes/register")
+def register_node(node: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Accepted and ignored: lets a real storage node run against the fake
+    without logging errors. The real coordinator keeps a registry."""
+    return {"ok": True, "mode": "fake"}
+
+
+@app.post("/internal/nodes/heartbeat")
+def node_heartbeat(beat: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    return {"ok": True, "mode": "fake"}
+
+
 def reset() -> None:
     """Wipe all data. For tests only."""
     with _lock:
