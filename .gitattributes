@@ -1,0 +1,18 @@
+# Store and check out text files with LF line endings on every OS.
+# Our code runs in Linux containers: a CRLF line ending breaks shell scripts
+# ("bash\r: not found") and shebang lines, so LF everywhere is the safe default.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never touch binary files.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.db  binary
