@@ -24,8 +24,11 @@ Any other value is rejected with **400**.
 PENDING ──► MATCHED ──► IN_PROGRESS ──► FULFILLED
    │           │             │
    ├──► UNMATCHED (nothing suitable found; can go back to PENDING for a retry)
-   └───────────┴─────────────┴──► CANCELLED
+   │    │
+   └────┴──────┴─────────────┴──► CANCELLED
 ```
+
+`UNMATCHED → CANCELLED` is allowed (the person gives up waiting).
 
 | Status | Plain meaning |
 |---|---|
@@ -45,6 +48,8 @@ PENDING ──► MATCHED ──► IN_PROGRESS ──► FULFILLED
 | `OFFLINE` | Temporarily not offering help |
 
 `ASSIGNED → AVAILABLE` happens when its request is `FULFILLED` or `CANCELLED`.
+
+Allowed resource moves: `AVAILABLE → ASSIGNED`, `AVAILABLE → OFFLINE`, `OFFLINE → AVAILABLE`, `ASSIGNED → AVAILABLE`. `ASSIGNED → OFFLINE` is **not** allowed directly: the resource must be released first, so no request is left stranded.
 
 Any status change that isn't allowed above is rejected with **409**.
 
