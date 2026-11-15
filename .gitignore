@@ -1,1 +1,7 @@
 slides-reference/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.db
+.env
