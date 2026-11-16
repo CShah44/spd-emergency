@@ -3,8 +3,8 @@
 Writes (synchronous replication):
   1. Send the client write to the shard's acting primary. It runs the
      compare-and-set and picks the new version.
-  2. Copy the result to the shard's other live node with /internal/replicate
-     ("store exactly version N if newer").
+  2. Copy the result to the shard's other node (UP or RECOVERING) with
+     /internal/replicate ("store exactly version N if newer").
   3. Answer the client only after both steps. If the replica can't be reached
      it is marked DOWN; the write is still safe on the primary and the replica
      catches up when it comes back (recovery). This is "degraded mode".
@@ -30,7 +30,7 @@ import httpx
 
 from common.sharding import shard_for
 
-from .registry import UP, Node, Registry
+from .registry import Node, Registry
 
 log = logging.getLogger("coordinator.router")
 
@@ -136,8 +136,8 @@ class Router:
             return node, resp
 
     async def _replicate(self, shard: int, key: str, written_on: Node, payload: dict[str, Any]) -> None:
-        targets = [n for n in self.registry.shard_nodes(shard) if n.node_id != written_on.node_id and n.state == UP]
-        for target in targets:
+        # RECOVERING nodes get copies too, so they can't miss writes made during catch-up.
+        for target in self.registry.replication_targets(shard, written_on.node_id):
             try:
                 resp = await self.http.put(target.url + _replicate_path(key), json=payload)
                 resp.raise_for_status()

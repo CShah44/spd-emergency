@@ -197,6 +197,18 @@ Node → coordinator: `POST /internal/nodes/register {node_id, shard, role, url}
 
 Rules: versions keep counting past a tombstone (deleted v3 → recreated v4). Replication and recovery both use "newer version wins", never timestamps, because container clocks can disagree.
 
+### 8.2 Node states, leadership and recovery
+
+| State | Serves reads/writes | Gets replicated writes |
+|---|---|---|
+| `UP` | yes | yes |
+| `RECOVERING` | no | yes |
+| `DOWN` | no | no |
+
+- A node that registers while its partner is `UP` starts `RECOVERING`. The coordinator compares both nodes' `/internal/sync`, copies each side's newer entries to the other (`POST /internal/replicate-batch`), and then marks it `UP`. With no `UP` partner, it starts `UP` on its own data.
+- A `DOWN` node's heartbeats get 404, so it must register again, which means it always catches up before serving again.
+- **Leadership is sticky:** the leader keeps the shard while it is `UP`. After a failover the replica keeps leading even when the old primary is back. Leadership moves only when the leader fails, so two nodes never accept compare-and-set writes for the same shard at once.
+
 ---
 
 ## 9. Recommended file structure

@@ -5,6 +5,7 @@
     DELETE /internal/data/{key}          tombstone; returns its version for replication
     GET    /internal/data?prefix=&f=v    search live records on THIS node
     PUT    /internal/replicate/{key}     "store exactly version N" if newer
+    POST   /internal/replicate-batch     the same for many entries (recovery)
     GET    /internal/sync?prefix=        every entry incl. tombstones (for recovery)
     GET    /health                       identity + key count (503 while paused)
     POST   /admin/pause | /admin/resume  simulate a failure on demand (demos)
@@ -86,6 +87,17 @@ class ReplicatePayload(BaseModel):
     version: int = Field(ge=1)
     deleted: bool = False
     record: dict[str, Any] | None = None
+
+
+class SyncEntry(BaseModel):
+    key: str
+    version: int = Field(ge=1)
+    deleted: bool = False
+    record: dict[str, Any] | None = None
+
+
+class ReplicateBatch(BaseModel):
+    entries: list[SyncEntry]
 
 
 def _parse_if_match(value: str) -> int:
@@ -182,6 +194,15 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
         applied = store().apply_replica(key, payload.version, payload.record, payload.deleted)
         # applied=False is NOT an error: we already had this version or a newer one.
         return {"key": key, "applied": applied, "version": store().version_of(key)}
+
+    @app.post("/internal/replicate-batch")
+    def replicate_batch(payload: ReplicateBatch) -> dict[str, Any]:
+        """Recovery: many entries in one call and one transaction, same "newer wins" rule."""
+        for e in payload.entries:
+            if not e.deleted and e.record is None:
+                raise HTTPException(400, detail=f"{e.key}: record is required unless deleted=true")
+        applied = store().apply_many([e.model_dump() for e in payload.entries])
+        return {"received": len(payload.entries), "applied": applied}
 
     @app.get("/internal/sync")
     def sync(prefix: str = "") -> dict[str, Any]:

@@ -98,7 +98,7 @@ def test_down_node_heartbeat_is_404_until_it_registers(coord, cluster):
     assert coord.post("/internal/nodes/heartbeat", json={"node_id": "s0-primary"}).status_code == 404
     cluster.net.dead.discard("s0-primary")
     cluster.register(coord, "s0-primary")
-    assert _states(coord)["s0-primary"] == "UP"
+    cluster.wait_state(coord, "s0-primary", "UP")
     assert coord.post("/internal/nodes/heartbeat", json={"node_id": "s0-primary"}).status_code == 200
 
 

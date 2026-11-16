@@ -140,22 +140,40 @@ class Store:
 
         Returns True if applied, False if we already had this version or a newer one.
         """
-        body = "{}" if deleted or record is None else _encode(record)
+        entry = {"key": key, "version": version, "deleted": deleted, "record": record}
+        return self.apply_many([entry]) == 1
+
+    def apply_many(self, entries: list[dict[str, Any]]) -> int:
+        """apply_replica for a whole batch in ONE transaction (fast catch-up).
+
+        Each entry: {key, version, deleted, record}. Returns how many were applied.
+        """
+        applied = 0
         with self._lock:
-            cur = self._conn.execute(
-                """
-                INSERT INTO kv (key, value_json, version, updated_at, deleted)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value_json = excluded.value_json,
-                    version    = excluded.version,
-                    updated_at = excluded.updated_at,
-                    deleted    = excluded.deleted
-                WHERE excluded.version > kv.version
-                """,
-                (key, body, version, utc_now_iso(), int(deleted)),
-            )
-            return cur.rowcount == 1
+            self._conn.execute("BEGIN")
+            try:
+                for e in entries:
+                    deleted = bool(e.get("deleted"))
+                    body = "{}" if deleted or e.get("record") is None else _encode(e["record"])
+                    cur = self._conn.execute(
+                        """
+                        INSERT INTO kv (key, value_json, version, updated_at, deleted)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET
+                            value_json = excluded.value_json,
+                            version    = excluded.version,
+                            updated_at = excluded.updated_at,
+                            deleted    = excluded.deleted
+                        WHERE excluded.version > kv.version
+                        """,
+                        (e["key"], body, e["version"], utc_now_iso(), int(deleted)),
+                    )
+                    applied += cur.rowcount
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")  # all or nothing
+                raise
+        return applied
 
     # -- reads -----------------------------------------------------------------------
 
