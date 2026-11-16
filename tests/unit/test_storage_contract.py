@@ -1,5 +1,8 @@
-"""The fake coordinator, driven through StorageClient: this checks both halves
-of the section 8 contract at once, without any network."""
+"""The section 8 contract, driven through StorageClient, run against BOTH the
+fake and the real coordinator (6 in-process storage nodes).
+
+This is a contract test: if both pass, the app services can switch from the
+fake to the real coordinator by changing COORDINATOR_URL only."""
 
 import threading
 
@@ -11,11 +14,15 @@ from common.storage_client import NotFound, StorageClient, VersionConflict
 from coordinator.app import fake
 
 
-@pytest.fixture
-def store():
-    fake.reset()
-    with TestClient(fake.app) as http:
-        yield StorageClient(client=http)
+@pytest.fixture(params=["fake", "real"])
+def store(request, tmp_path):
+    if request.param == "fake":
+        fake.reset()
+        with TestClient(fake.app) as http:
+            yield StorageClient(client=http)
+    else:
+        coord = request.getfixturevalue("coord")
+        yield StorageClient(client=coord)
 
 
 def _resource(rid, type_="water", status="AVAILABLE"):
@@ -100,7 +107,7 @@ def test_status_counts_keys_per_shard(store):
     for k in keys:
         store.put(k, {"id": k})
     status = store.status()
-    assert status["mode"] == "fake"
+    assert status["mode"] in ("fake", "real")
     assert len(status["nodes"]) == 6
     assert status["total_keys"] == 30
     for shard in range(3):

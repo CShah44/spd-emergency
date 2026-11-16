@@ -1,0 +1,101 @@
+# Storage side [A]: the coordinator and 6 storage nodes (3 shards x primary + replica).
+# Person B adds rabbitmq, request-service and matching-service below.
+#
+#   docker compose up --build -d
+#   curl localhost:8000/internal/status
+#   docker compose stop storage-s0-primary      # storage failure demo
+#
+# Host ports: coordinator 8000, nodes 9001-9006 (for /health and /admin/pause).
+
+x-storage-node: &storage-node
+  build:
+    context: .
+    dockerfile: services/storage_node/Dockerfile
+  image: storage-node
+  depends_on:
+    - coordinator
+  restart: "no" # failure demos stop nodes on purpose; don't bring them back automatically
+
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: services/coordinator/Dockerfile
+    image: coordinator
+    environment:
+      NUM_SHARDS: "3"
+      HEARTBEAT_TIMEOUT_S: "10"
+    ports:
+      - "8000:8000"
+
+  storage-s0-primary:
+    <<: *storage-node
+    environment: &node-env
+      NODE_ID: s0-primary
+      SHARD_ID: "0"
+      ROLE: primary
+      NODE_URL: http://storage-s0-primary:9000
+      COORDINATOR_URL: http://coordinator:8000
+      HEARTBEAT_INTERVAL_S: "3"
+    volumes: [s0-primary-data:/data]
+    ports: ["9001:9000"]
+
+  storage-s0-replica:
+    <<: *storage-node
+    environment:
+      <<: *node-env
+      NODE_ID: s0-replica
+      ROLE: replica
+      NODE_URL: http://storage-s0-replica:9000
+    volumes: [s0-replica-data:/data]
+    ports: ["9002:9000"]
+
+  storage-s1-primary:
+    <<: *storage-node
+    environment:
+      <<: *node-env
+      NODE_ID: s1-primary
+      SHARD_ID: "1"
+      NODE_URL: http://storage-s1-primary:9000
+    volumes: [s1-primary-data:/data]
+    ports: ["9003:9000"]
+
+  storage-s1-replica:
+    <<: *storage-node
+    environment:
+      <<: *node-env
+      NODE_ID: s1-replica
+      SHARD_ID: "1"
+      ROLE: replica
+      NODE_URL: http://storage-s1-replica:9000
+    volumes: [s1-replica-data:/data]
+    ports: ["9004:9000"]
+
+  storage-s2-primary:
+    <<: *storage-node
+    environment:
+      <<: *node-env
+      NODE_ID: s2-primary
+      SHARD_ID: "2"
+      NODE_URL: http://storage-s2-primary:9000
+    volumes: [s2-primary-data:/data]
+    ports: ["9005:9000"]
+
+  storage-s2-replica:
+    <<: *storage-node
+    environment:
+      <<: *node-env
+      NODE_ID: s2-replica
+      SHARD_ID: "2"
+      ROLE: replica
+      NODE_URL: http://storage-s2-replica:9000
+    volumes: [s2-replica-data:/data]
+    ports: ["9006:9000"]
+
+volumes:
+  s0-primary-data:
+  s0-replica-data:
+  s1-primary-data:
+  s1-replica-data:
+  s2-primary-data:
+  s2-replica-data:
