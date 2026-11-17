@@ -17,7 +17,7 @@ import argparse
 import time
 
 from _demo import (
-    METHODS, METHODS_HELP, banner, check_stack, fail, fail_node, leader_of, new_request, node_direct, node_state, ok,
+    METHODS, METHODS_HELP, banner, check_stack, coordinator_logs_cmd, fail, fail_node, leader_of, new_request, node_direct, node_state, ok,
     pause_for_audience, print_status, revive_node, step, store, wait_for,
 )
 
@@ -85,7 +85,7 @@ def main() -> None:
         time.sleep(0.1)
     print("   state changes seen: " + "  ->  ".join(seen))
     print("   (RECOVERING usually lasts only milliseconds, so the poll may not catch it;")
-    print("    the coordinator log shows it: docker compose logs coordinator)")
+    print(f"    the coordinator log shows it: {coordinator_logs_cmd()})")
 
     report = next(n for n in store.status()["nodes"] if n["node_id"] == victim)["last_recovery"]
     if report:

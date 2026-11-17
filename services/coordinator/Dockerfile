@@ -13,4 +13,4 @@ COPY services/coordinator/app ./app
 ENV APP_MODULE=app.main:app \
     PYTHONUNBUFFERED=1
 EXPOSE 8000
-CMD ["sh", "-c", "uvicorn $APP_MODULE --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "exec uvicorn $APP_MODULE --host 0.0.0.0 --port 8000"]

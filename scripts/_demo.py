@@ -138,6 +138,17 @@ def revive_node(node_id: str, method: str) -> None:
     # the same name and the same volume, and the node registers and catches up.
 
 
+def on_kubernetes() -> bool:
+    """Nodes register with their StatefulSet DNS name (shard0-0.shard0) on
+    Kubernetes and with their Compose service name (storage-s0-primary) otherwise."""
+    return any("://shard" in n["url"] for n in store.status()["nodes"])
+
+
+def coordinator_logs_cmd() -> str:
+    return ("kubectl logs -n emergency deploy/coordinator" if on_kubernetes()
+            else "docker compose logs coordinator")
+
+
 def node_state(node_id: str) -> str:
     return next(n["state"] for n in store.status()["nodes"] if n["node_id"] == node_id)
 

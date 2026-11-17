@@ -59,6 +59,9 @@ def main() -> None:
     print_status("BEFORE the failure:", focus_shard=shard)
     pause_for_audience(args.step)
 
+    if args.method == "delete-pod":
+        return delete_pod_story(shard, victim, args.step)
+
     step(f"FAILING {victim} with method '{args.method}'")
     fail_node(victim, args.method)
     ok(f"{victim} is {'stopped' if args.method == 'stop' else 'paused'}")
@@ -95,9 +98,8 @@ def main() -> None:
         store.put(k, rec)
         ok(f"shard {other}: wrote {k}, led by {leader_of(other)}")
 
-    if args.restore or args.method == "delete-pod":
-        step(f"Restoring {victim}" if args.method != "delete-pod"
-             else f"Kubernetes is recreating pod {pod_of(victim)} by itself")
+    if args.restore:
+        step(f"Restoring {victim}")
         revive_node(victim, args.method)
         took = wait_for(lambda: node_state(victim) == "UP", timeout=60)
         ok(f"{victim} is back UP after {took:.1f}s (it caught up first)" if took else f"{victim} not UP yet")
@@ -105,6 +107,59 @@ def main() -> None:
     else:
         print(f"\n   {victim} is still down. Next: python scripts/demo_recovery.py --node {victim}"
               + (f" --method {args.method}" if args.method != "stop" else ""))
+
+
+def delete_pod_story(shard: int, victim: str, stepwise: bool) -> None:
+    """Kubernetes version of the demo. A deleted pod is not down for long: it
+    finishes in-flight work during its graceful shutdown (a few seconds), and the
+    StatefulSet starts a replacement with the same name and volume a few seconds
+    later, often before the 10 s heartbeat timeout. So instead of "fail, then
+    poke at it", we keep writing to the shard the whole time and record what the
+    coordinator saw. The point to make: no write fails, while Kubernetes heals
+    the node and our recovery brings it up to date."""
+    step(f"Deleting pod {pod_of(victim)} ({victim}) and writing to shard {shard} every 0.2 s")
+    fail_node(victim, "delete-pod")
+    start = time.monotonic()
+    timeline, last_state, last_leader = [], None, None
+    ok_writes, failed_writes, left_up = 0, 0, False
+    while time.monotonic() - start < 90:
+        t = time.monotonic() - start
+        try:
+            k, rec = new_request(shard)
+            store.put(k, rec)
+            ok_writes += 1
+        except StorageError as exc:
+            failed_writes += 1
+            fail(f"+{t:.1f}s write failed: {exc}")
+        try:
+            st = store.status()
+            state = next(n["state"] for n in st["nodes"] if n["node_id"] == victim)
+            leader = st["shards"][str(shard)]["acting_primary"]
+        except Exception:  # noqa: BLE001
+            state, leader = None, last_leader
+        if state and state != last_state:
+            timeline.append(f"+{t:.1f}s {victim} {state}")
+            last_state = state
+        if leader != last_leader:
+            timeline.append(f"+{t:.1f}s leader is {leader}")
+            last_leader = leader
+        left_up = left_up or state not in ("UP", None)
+        if left_up and state == "UP":
+            break
+        time.sleep(0.2)
+
+    for line in timeline:
+        print(f"   {line}")
+    (ok if failed_writes == 0 else fail)(f"{ok_writes} writes succeeded, {failed_writes} failed")
+    if not left_up:
+        fail(f"the coordinator never saw {victim} leave UP (try again; the timing varies)")
+        return
+    report = next(n for n in store.status()["nodes"] if n["node_id"] == victim)["last_recovery"]
+    if report:
+        ok(f"new pod caught up from {report['partner']}: copied {report['pulled']} entries "
+           f"(the writes it missed), conflicts {report['conflicts']}, took {report['seconds'] * 1000:.0f} ms")
+    print_status("AFTER (same pod name, same volume, data up to date):", focus_shard=shard)
+    pause_for_audience(stepwise)
 
 
 if __name__ == "__main__":
