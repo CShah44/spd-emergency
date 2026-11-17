@@ -7,7 +7,8 @@
     PUT    /internal/replicate/{key}     "store exactly version N" if newer
     POST   /internal/replicate-batch     the same for many entries (recovery)
     GET    /internal/sync?prefix=        every entry incl. tombstones (for recovery)
-    GET    /health                       identity + key count (503 while paused)
+    GET    /health                       identity + key count (503 while paused): readiness
+    GET    /livez                        process is alive (even while paused): liveness
     POST   /admin/pause | /admin/resume  simulate a failure on demand (demos)
 
 Settings come from environment variables (see NodeSettings.from_env).
@@ -52,12 +53,17 @@ class NodeSettings:
     @classmethod
     def from_env(cls) -> "NodeSettings":
         port = os.environ.get("PORT", "9000")
+        shard = int(os.environ.get("SHARD_ID", "0"))
         role = os.environ.get("ROLE", "primary")
+        if role == "from-ordinal":
+            # Kubernetes StatefulSet: pods are named <set>-0, <set>-1, ... and keep
+            # that name across restarts. Ordinal 0 is the primary, 1 the replica.
+            role = role_from_ordinal(os.environ.get("POD_NAME") or socket.gethostname())
         if role not in ("primary", "replica"):
-            raise ValueError(f"ROLE must be primary or replica, got {role!r}")
+            raise ValueError(f"ROLE must be primary, replica or from-ordinal, got {role!r}")
         return cls(
-            node_id=os.environ.get("NODE_ID", "node-local"),
-            shard_id=int(os.environ.get("SHARD_ID", "0")),
+            node_id=os.environ.get("NODE_ID") or f"s{shard}-{role}",
+            shard_id=shard,
             role=role,
             data_dir=os.environ.get("DATA_DIR", "./data"),
             coordinator_url=config.COORDINATOR_URL,
@@ -65,6 +71,16 @@ class NodeSettings:
             heartbeat_interval=config.HEARTBEAT_INTERVAL_S,
             heartbeat_enabled=os.environ.get("HEARTBEAT_ENABLED", "true").lower() == "true",
         )
+
+
+def role_from_ordinal(pod_name: str) -> str:
+    """'shard0-0' -> 'primary', 'shard0-1' -> 'replica'. A third pod would also say
+    'replica'; the coordinator then refuses it (409: slot taken)."""
+    try:
+        ordinal = int(pod_name.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        raise ValueError(f"ROLE=from-ordinal needs a StatefulSet pod name like shard0-1, got {pod_name!r}")
+    return "primary" if ordinal == 0 else "replica"
 
 
 class NodeState:
@@ -135,8 +151,9 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
     @app.middleware("http")
     async def pause_gate(request: Request, call_next):
         # A paused node behaves like a dead one: no answers, no heartbeats.
-        # /admin stays open so we can resume it.
-        if state.paused and not request.url.path.startswith("/admin"):
+        # /admin stays open so we can resume it, and /livez so Kubernetes
+        # doesn't restart a paused pod in the middle of a demo.
+        if state.paused and not request.url.path.startswith(("/admin", "/livez")):
             return JSONResponse({"detail": f"{settings.node_id} is paused"}, status_code=503)
         return await call_next(request)
 
@@ -219,6 +236,12 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
             "coordinator_reachable": state.last_heartbeat_ok,
             "started_at": state.started_at,
         }
+
+    @app.get("/livez")
+    def livez() -> dict[str, str]:
+        """Liveness: is the process alive? (Kubernetes restarts the pod if not.)
+        Readiness uses /health, which also says 'can serve data'."""
+        return {"status": "alive"}
 
     @app.post("/admin/pause")
     def pause() -> dict[str, Any]:

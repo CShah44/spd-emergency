@@ -109,19 +109,25 @@ def test_register_rejects_slot_conflict(coord):
 
 
 def test_silent_node_marked_down_by_sweeper(tmp_path):
+    """One node keeps heartbeating, the other goes silent: only the silent one
+    is marked DOWN. Only two nodes, and no waiting for every node to be UP
+    first: with a 0.2 s timeout that setup could itself take too long and
+    (correctly) get every node marked DOWN, which made this test flaky."""
     cluster = Cluster(tmp_path, heartbeat_timeout=0.2)
     try:
         with TestClient(cluster.coordinator) as http:
-            cluster.register_all(http)
-            deadline = time.monotonic() + 2
+            cluster.register(http, "s0-primary")
+            cluster.register(http, "s0-replica")
+            deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
                 http.post("/internal/nodes/heartbeat", json={"node_id": "s0-replica"})  # only this one
-                if _states(http)["s0-primary"] == "DOWN":
+                states = _states(http)
+                if states["s0-primary"] == "DOWN" and states["s0-replica"] == "UP":
                     break
-                time.sleep(0.05)
+                time.sleep(0.03)
             states = _states(http)
             assert states["s0-primary"] == "DOWN"
-            assert states["s0-replica"] == "UP"
+            assert states["s0-replica"] == "UP"  # kept alive by its heartbeats
     finally:
         cluster.close()
 

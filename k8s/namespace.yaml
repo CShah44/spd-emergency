@@ -1,0 +1,6 @@
+# [Both] Everything for the project lives in one namespace, so
+# `kubectl delete namespace emergency` removes it all.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: emergency

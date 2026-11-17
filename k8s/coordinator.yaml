@@ -1,0 +1,53 @@
+# [A] The coordinator: Deployment + Service.
+#
+# Exactly ONE replica, on purpose. The coordinator keeps the node registry
+# (who is UP, who leads each shard) in memory. Two copies behind one Service
+# would each see only half the heartbeats and disagree about leaders: split
+# brain. If the pod dies, Kubernetes starts a new one and every storage node
+# registers again within one heartbeat (3 s), rebuilding the registry.
+# (The app services, Person B's, are stateless and DO run 2+ replicas.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coordinator
+  namespace: emergency
+  labels: {app: coordinator}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # never two coordinators at once, even during an update
+  selector:
+    matchLabels: {app: coordinator}
+  template:
+    metadata:
+      labels: {app: coordinator}
+    spec:
+      containers:
+        - name: coordinator
+          image: coordinator:latest
+          imagePullPolicy: IfNotPresent # use the image built locally by docker compose build
+          envFrom:
+            - configMapRef: {name: emergency-config}
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator # -> DNS name "coordinator" inside the namespace
+  namespace: emergency
+spec:
+  selector: {app: coordinator}
+  ports:
+    - port: 8000
+      targetPort: 8000

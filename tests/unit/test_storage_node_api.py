@@ -147,3 +147,30 @@ def test_paused_node_sends_nothing(tmp_path):
     state.paused = True
     _run_heartbeats(state, lambda req: calls.append(req) or httpx.Response(200, json={}))
     assert calls == []
+
+
+# -- Kubernetes settings ----------------------------------------------------------------
+
+
+def test_role_from_statefulset_ordinal():
+    from storage_node.app.main import role_from_ordinal
+
+    assert role_from_ordinal("shard0-0") == "primary"
+    assert role_from_ordinal("shard2-1") == "replica"
+    with pytest.raises(ValueError):
+        role_from_ordinal("storage-node")
+
+
+def test_from_env_in_a_statefulset(monkeypatch):
+    monkeypatch.setenv("ROLE", "from-ordinal")
+    monkeypatch.setenv("POD_NAME", "shard1-1")
+    monkeypatch.setenv("SHARD_ID", "1")
+    monkeypatch.delenv("NODE_ID", raising=False)
+    s = NodeSettings.from_env()
+    assert (s.role, s.node_id, s.shard_id) == ("replica", "s1-replica", 1)
+
+
+def test_livez_stays_up_while_paused(node):
+    node.post("/admin/pause")
+    assert node.get("/health").status_code == 503  # readiness: not serving
+    assert node.get("/livez").status_code == 200  # liveness: don't restart me

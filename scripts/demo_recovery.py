@@ -17,7 +17,7 @@ import argparse
 import time
 
 from _demo import (
-    banner, check_stack, fail, fail_node, leader_of, new_request, node_direct, node_state, ok,
+    METHODS, METHODS_HELP, banner, check_stack, fail, fail_node, leader_of, new_request, node_direct, node_state, ok,
     pause_for_audience, print_status, revive_node, step, store, wait_for,
 )
 
@@ -25,8 +25,8 @@ from _demo import (
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--node", help="the node to recover (default: any DOWN node, else fail shard 0's leader)")
-    p.add_argument("--method", choices=["stop", "pause"], default="stop",
-                   help="how the node was failed (stop = docker compose stop, pause = /admin/pause)")
+    p.add_argument("--method", choices=METHODS, default="stop",
+                   help="how to fail the node: " + METHODS_HELP)
     p.add_argument("--step", action="store_true", help="wait for Enter between stages")
     args = p.parse_args()
     check_stack()

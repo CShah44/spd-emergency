@@ -1,0 +1,74 @@
+# [A] Shard 1. GENERATED from storage-shard0.yaml by scripts/gen_k8s_shards.py; edit that file instead.
+apiVersion: v1
+kind: Service
+metadata:
+  name: shard1
+  namespace: emergency
+spec:
+  clusterIP: None # headless: no load balancing, one DNS record per pod
+  # Keep DNS records for pods that aren't ready. A paused or recovering node is
+  # "not ready", but the coordinator still has to reach it to catch it up.
+  publishNotReadyAddresses: true
+  selector: {app: storage, shard: "1"}
+  ports:
+    - port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: shard1
+  namespace: emergency
+spec:
+  serviceName: shard1
+  replicas: 2 # primary + replica
+  podManagementPolicy: Parallel # start both at once; recovery handles the order
+  selector:
+    matchLabels: {app: storage, shard: "1"}
+  template:
+    metadata:
+      labels: {app: storage, shard: "1"}
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: storage-node
+          image: storage-node:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: {name: emergency-config}
+          env:
+            - name: SHARD_ID
+              value: "1"
+            - name: ROLE
+              value: from-ordinal # shard1-0 -> primary, shard1-1 -> replica
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: {fieldPath: metadata.name}
+            - name: NODE_URL # how the coordinator reaches this pod
+              value: "http://$(POD_NAME).shard1:9000"
+          ports:
+            - containerPort: 9000
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # Readiness = "can serve data" (503 while paused).
+          readinessProbe:
+            httpGet: {path: /health, port: 9000}
+            periodSeconds: 5
+          # Liveness = "process is alive" (still 200 while paused), so a paused
+          # node isn't restarted during the failure demo.
+          livenessProbe:
+            httpGet: {path: /livez, port: 9000}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+  volumeClaimTemplates:
+    - metadata:
+        name: data # -> PersistentVolumeClaims data-shard1-0 and data-shard1-1
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi

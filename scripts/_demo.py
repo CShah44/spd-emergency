@@ -106,18 +106,36 @@ def node_direct(node_id: str, path: str, method: str = "GET") -> httpx.Response:
     return httpx.request(method, node_url(node_id) + path, timeout=3.0)
 
 
+METHODS = ("stop", "pause", "delete-pod")
+METHODS_HELP = ("stop = docker compose stop; pause = POST /admin/pause (Compose or Kubernetes); "
+                "delete-pod = kubectl delete pod (Kubernetes restarts it by itself)")
+
+
+def pod_of(node_id: str) -> str:
+    """s1-replica -> shard1-1 (StatefulSet ordinal 0 = primary, 1 = replica)."""
+    shard, role = node_id[1], node_id.split("-")[1]
+    return f"shard{shard}-{0 if role == 'primary' else 1}"
+
+
 def fail_node(node_id: str, method: str) -> None:
     if method == "stop":
         compose("stop", service_of(node_id))
-    else:
+    elif method == "pause":
         node_direct(node_id, "/admin/pause", "POST").raise_for_status()
+    elif method == "delete-pod":
+        subprocess.run(["kubectl", "delete", "pod", "-n", "emergency", pod_of(node_id), "--wait=false"],
+                       check=True, capture_output=True)
+    else:
+        raise ValueError(method)
 
 
 def revive_node(node_id: str, method: str) -> None:
     if method == "stop":
         compose("start", service_of(node_id))
-    else:
+    elif method == "pause":
         node_direct(node_id, "/admin/resume", "POST").raise_for_status()
+    # delete-pod: nothing to do. The StatefulSet controller recreates the pod with
+    # the same name and the same volume, and the node registers and catches up.
 
 
 def node_state(node_id: str) -> str:

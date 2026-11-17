@@ -7,15 +7,18 @@
 --method stop   docker compose stop (the container really dies: connection refused)
 --method pause  POST /admin/pause on the node (it answers 503 and stops heartbeating;
                 handy on Kubernetes, where a stopped pod is restarted at once)
+--method delete-pod  kubectl delete pod: Kubernetes recreates it with the same name
+                and volume within seconds, and it catches up by itself
 
-By default the failed node is LEFT DOWN, so you can run demo_recovery.py next.
+By default the failed node is LEFT DOWN, so you can run demo_recovery.py next
+(not possible with delete-pod: Kubernetes brings it back on its own).
 """
 
 import argparse
 import time
 
 from _demo import (
-    banner, check_stack, fail, fail_node, leader_of, new_request, new_resource, node_state, ok,
+    METHODS, METHODS_HELP, banner, check_stack, fail, fail_node, leader_of, new_request, new_resource, node_state, ok, pod_of,
     pause_for_audience, print_status, revive_node, step, store, wait_for,
 )
 from common.storage_client import StorageError
@@ -31,7 +34,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--shard", type=int, default=0, choices=[0, 1, 2])
     p.add_argument("--node", help="node to fail (default: the shard's current leader)")
-    p.add_argument("--method", choices=["stop", "pause"], default="stop")
+    p.add_argument("--method", choices=METHODS, default="stop", help=METHODS_HELP)
     p.add_argument("--restore", action="store_true", help="bring the node back at the end")
     p.add_argument("--step", action="store_true", help="wait for Enter between stages")
     args = p.parse_args()
@@ -92,15 +95,16 @@ def main() -> None:
         store.put(k, rec)
         ok(f"shard {other}: wrote {k}, led by {leader_of(other)}")
 
-    if args.restore:
-        step(f"Restoring {victim}")
+    if args.restore or args.method == "delete-pod":
+        step(f"Restoring {victim}" if args.method != "delete-pod"
+             else f"Kubernetes is recreating pod {pod_of(victim)} by itself")
         revive_node(victim, args.method)
-        took = wait_for(lambda: node_state(victim) == "UP", timeout=30)
+        took = wait_for(lambda: node_state(victim) == "UP", timeout=60)
         ok(f"{victim} is back UP after {took:.1f}s (it caught up first)" if took else f"{victim} not UP yet")
-        print_status("AFTER restoring:", focus_shard=shard)
+        print_status("AFTER:", focus_shard=shard)
     else:
         print(f"\n   {victim} is still down. Next: python scripts/demo_recovery.py --node {victim}"
-              + (" --method pause" if args.method == "pause" else ""))
+              + (f" --method {args.method}" if args.method != "stop" else ""))
 
 
 if __name__ == "__main__":

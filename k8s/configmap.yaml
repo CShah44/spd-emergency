@@ -1,0 +1,14 @@
+# [Both] Settings shared by every service (read by services/common/config.py).
+# Same images as Docker Compose; only these values change per environment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: emergency-config
+  namespace: emergency
+data:
+  COORDINATOR_URL: "http://coordinator:8000"
+  NUM_SHARDS: "3"
+  HEARTBEAT_INTERVAL_S: "3"
+  HEARTBEAT_TIMEOUT_S: "10"
+  MAX_MATCH_KM: "50"
+  RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
