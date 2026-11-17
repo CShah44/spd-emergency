@@ -60,7 +60,11 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        async with httpx.AsyncClient(timeout=node_timeout, transport=node_transport) as http:
+        # Connecting inside the cluster network takes milliseconds, so a short
+        # connect limit lets us fail over to the partner quickly when a node is
+        # dead. Waiting for an ANSWER keeps the longer limit (a busy node is slow).
+        timeout = httpx.Timeout(node_timeout, connect=min(node_timeout, 0.5))
+        async with httpx.AsyncClient(timeout=timeout, transport=node_transport) as http:
             holder["router"] = Router(registry, http)
             task = asyncio.create_task(sweeper())
             yield
