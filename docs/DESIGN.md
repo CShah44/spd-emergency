@@ -178,6 +178,37 @@ The node-side calls in the spec (`/internal/nodes/register`, `/internal/nodes/he
 
 If the right shard has no live node at all, the coordinator answers **503**.
 
+### 8.1 Behind the coordinator (Person A only)
+
+Storage node API. Only the coordinator calls these.
+
+| Call | What it does | Answers |
+|---|---|---|
+| `PUT /internal/data/{key}` (+ optional `If-Match`) | Client write on the acting primary; the node picks the next version | 200 record, 404, 409 |
+| `GET /internal/data/{key}` | One live record | 200, 404 |
+| `DELETE /internal/data/{key}` | Leaves a **tombstone** (`deleted=1`, new version) | 200 `{key, version, deleted}`, 404 |
+| `GET /internal/data?prefix=&<field>=` | Search live records on this node | 200 list |
+| `PUT /internal/replicate/{key}` body `{version, deleted, record}` | Store exactly this version **only if newer** than what the node holds | 200 `{applied, version}` |
+| `GET /internal/sync?prefix=` | Every entry including tombstones, for recovery | 200 `{node_id, entries}` |
+| `GET /health` | Identity and key count; 503 while paused | 200 / 503 |
+| `POST /admin/pause`, `/admin/resume` | Simulate a failure (demos) | 200 |
+
+Node → coordinator: `POST /internal/nodes/register {node_id, shard, role, url}` on startup and after a pause, then `POST /internal/nodes/heartbeat {node_id}` every 3 s. A 404 to a heartbeat means "register again".
+
+Rules: versions keep counting past a tombstone (deleted v3 → recreated v4). Replication and recovery both use "newer version wins", never timestamps, because container clocks can disagree.
+
+### 8.2 Node states, leadership and recovery
+
+| State | Serves reads/writes | Gets replicated writes |
+|---|---|---|
+| `UP` | yes | yes |
+| `RECOVERING` | no | yes |
+| `DOWN` | no | no |
+
+- A node that registers while its partner is `UP` starts `RECOVERING`. The coordinator compares both nodes' `/internal/sync`, copies each side's newer entries to the other (`POST /internal/replicate-batch`), and then marks it `UP`. With no `UP` partner, it starts `UP` on its own data.
+- A `DOWN` node's heartbeats get 404, so it must register again, which means it always catches up before serving again.
+- **Leadership is sticky:** the leader keeps the shard while it is `UP`. After a failover the replica keeps leading even when the old primary is back. Leadership moves only when the leader fails, so two nodes never accept compare-and-set writes for the same shard at once.
+
 ---
 
 ## 9. Recommended file structure
