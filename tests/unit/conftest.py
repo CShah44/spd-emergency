@@ -11,6 +11,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from common.sharding import request_key, resource_key
+from common.storage_client import StorageClient
+from coordinator.app import fake
 from coordinator.app.main import create_app as create_coordinator
 from storage_node.app.db import Store
 from storage_node.app.main import NodeSettings
@@ -117,3 +120,42 @@ def coord(cluster):
     with TestClient(cluster.coordinator) as http:
         cluster.register_all(http)
         yield http
+
+
+# -- app side (request + matching service) ------------------------------------------------------
+# These run against the in-memory fake coordinator: same /store API as the real one
+# (test_storage_contract.py proves they behave the same), so there is no cluster to start.
+
+@pytest.fixture
+def fake_store():
+    """A StorageClient on the fake coordinator, emptied before each test."""
+    fake.reset()
+    with TestClient(fake.app) as http:
+        yield StorageClient(client=http)
+
+
+@pytest.fixture
+def add_resource(fake_store):
+    """add_resource("res-1", type="water", lat=..., lon=..., status=...) stores a resource."""
+    def add(rid="res-1", type="water", lat=12.97, lon=77.59, status="AVAILABLE",
+            created_at="2026-11-09T09:00:00Z", **extra):
+        record = {
+            "id": rid, "type": type, "name": rid, "location": {"lat": lat, "lon": lon},
+            "status": status, "assigned_request_id": None,
+            "created_at": created_at, "updated_at": created_at, **extra,
+        }
+        return fake_store.put(resource_key(rid), record)
+    return add
+
+
+@pytest.fixture
+def add_request(fake_store):
+    """add_request("req-1", type="water", lat=..., lon=..., status=...) stores a request."""
+    def add(rid="req-1", type="water", lat=12.97, lon=77.59, status="PENDING", **extra):
+        record = {
+            "id": rid, "type": type, "location": {"lat": lat, "lon": lon},
+            "status": status, "assigned_resource_id": None,
+            "created_at": "2026-11-09T10:00:00Z", "updated_at": "2026-11-09T10:00:00Z", **extra,
+        }
+        return fake_store.put(request_key(rid), record)
+    return add
