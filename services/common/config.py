@@ -24,3 +24,9 @@ HEARTBEAT_TIMEOUT_S: float = _env_float("HEARTBEAT_TIMEOUT_S", 10.0)
 
 MAX_MATCH_KM: float = _env_float("MAX_MATCH_KM", 50.0)
 RABBITMQ_URL: str = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+
+# App side: the request service calls the matching service for POST /match/{id}.
+MATCHING_SERVICE_URL: str = os.environ.get("MATCHING_SERVICE_URL", "http://localhost:8001")
+MATCH_TIMEOUT_S: float = _env_float("MATCH_TIMEOUT_S", 15.0)
+# A queue message that fails this many times goes to the dead-letter queue (DESIGN.md section 7).
+MAX_DELIVERY_ATTEMPTS: int = _env_int("MAX_DELIVERY_ATTEMPTS", 3)
