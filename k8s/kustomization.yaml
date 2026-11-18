@@ -1,6 +1,5 @@
 # [Both] Apply everything in the right order with one command:
 #   kubectl apply -k k8s/
-# Person B adds rabbitmq.yaml, request-service.yaml and matching-service.yaml here.
 resources:
   - namespace.yaml
   - configmap.yaml
@@ -8,3 +7,6 @@ resources:
   - storage-shard0.yaml
   - storage-shard1.yaml
   - storage-shard2.yaml
+  - rabbitmq.yaml
+  - request-service.yaml
+  - matching-service.yaml

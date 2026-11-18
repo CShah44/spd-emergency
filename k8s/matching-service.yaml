@@ -1,0 +1,50 @@
+# [B] The matching service: Deployment + Service.
+#
+# Each replica runs a RabbitMQ consumer (one message at a time), so more
+# replicas drain the queue faster:  kubectl scale deploy/matching-service -n emergency --replicas=4
+# Delete a pod and the Deployment replaces it; a message that pod had not
+# finished is handed to another replica, because it is acknowledged only after matching.
+# The Service is for POST /match/{id}, which the request service forwards here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matching-service
+  namespace: emergency
+  labels: {app: matching-service}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: matching-service}
+  template:
+    metadata:
+      labels: {app: matching-service}
+    spec:
+      containers:
+        - name: matching-service
+          image: matching-service:latest
+          imagePullPolicy: IfNotPresent # use the image built locally by docker compose build
+          envFrom:
+            - configMapRef: {name: emergency-config}
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: matching-service # -> DNS name "matching-service" inside the namespace
+  namespace: emergency
+spec:
+  selector: {app: matching-service}
+  ports:
+    - port: 8000
+      targetPort: 8000

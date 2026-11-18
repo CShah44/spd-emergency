@@ -12,3 +12,4 @@ data:
   HEARTBEAT_TIMEOUT_S: "10"
   MAX_MATCH_KM: "50"
   RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+  MATCHING_SERVICE_URL: "http://matching-service:8000"

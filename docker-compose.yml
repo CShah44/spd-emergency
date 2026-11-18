@@ -1,11 +1,15 @@
-# Storage side [A]: the coordinator and 6 storage nodes (3 shards x primary + replica).
-# Person B adds rabbitmq, request-service and matching-service below.
+# The whole system: storage side [A] (coordinator + 6 storage nodes, 3 shards x primary +
+# replica) and app side [B] (RabbitMQ, request service, matching service).
 #
 #   docker compose up --build -d
-#   curl localhost:8000/internal/status
-#   docker compose stop storage-s0-primary      # storage failure demo
+#   curl localhost:8000/internal/status             # storage cluster
+#   curl localhost:8080/docs                        # client API (Swagger UI)
+#   docker compose stop storage-s0-primary          # storage failure demo
+#   docker compose up -d --scale matching-service=3 # more matchers share the queue
 #
-# Host ports: coordinator 8000, nodes 9001-9006 (for /health and /admin/pause).
+# Host ports: request service 8080, coordinator 8000, nodes 9001-9006 (for /health and
+# /admin/pause), RabbitMQ 5672 and its management UI 15672 (guest / guest).
+# The matching service has no host port on purpose: a fixed port would stop --scale.
 
 x-storage-node: &storage-node
   build:
@@ -27,6 +31,58 @@ services:
       HEARTBEAT_TIMEOUT_S: "10"
     ports:
       - "8000:8000"
+    healthcheck: # lets the app services wait for it (depends_on: service_healthy)
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # -- app side [B] ---------------------------------------------------------------------------
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    hostname: rabbitmq # RabbitMQ names its data folder after the hostname: keep it fixed so the volume is reused
+    ports:
+      - "5672:5672"
+      - "15672:15672" # management UI: http://localhost:15672 (guest / guest)
+    volumes: [rabbitmq-data:/var/lib/rabbitmq] # queued messages survive a restart
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  request-service:
+    build:
+      context: .
+      dockerfile: services/request_service/Dockerfile
+    image: request-service
+    environment:
+      COORDINATOR_URL: http://coordinator:8000
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MATCHING_SERVICE_URL: http://matching-service:8000
+    depends_on:
+      coordinator: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+    ports:
+      - "8080:8000"
+    restart: unless-stopped
+
+  matching-service:
+    build:
+      context: .
+      dockerfile: services/matching_service/Dockerfile
+    image: matching-service
+    environment:
+      COORDINATOR_URL: http://coordinator:8000
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MAX_MATCH_KM: "50"
+    depends_on:
+      coordinator: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+    restart: unless-stopped
+
+  # -- storage side [A] -------------------------------------------------------------------------
 
   storage-s0-primary:
     <<: *storage-node
@@ -93,6 +149,7 @@ services:
     ports: ["9006:9000"]
 
 volumes:
+  rabbitmq-data:
   s0-primary-data:
   s0-replica-data:
   s1-primary-data:

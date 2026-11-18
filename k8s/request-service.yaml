@@ -1,0 +1,49 @@
+# [B] The request service (client REST API): Deployment + Service.
+#
+# Stateless: every record lives in the storage cluster, so any number of
+# replicas can run behind the one Service and Kubernetes spreads the calls.
+# Delete a pod and the Deployment replaces it; the other replica keeps answering meanwhile.
+#   kubectl port-forward -n emergency svc/request-service 8080:8000   (or: scripts/k8s_forward.py)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: request-service
+  namespace: emergency
+  labels: {app: request-service}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: request-service}
+  template:
+    metadata:
+      labels: {app: request-service}
+    spec:
+      containers:
+        - name: request-service
+          image: request-service:latest
+          imagePullPolicy: IfNotPresent # use the image built locally by docker compose build
+          envFrom:
+            - configMapRef: {name: emergency-config}
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: request-service # -> DNS name "request-service" inside the namespace
+  namespace: emergency
+spec:
+  selector: {app: request-service}
+  ports:
+    - port: 8000
+      targetPort: 8000
