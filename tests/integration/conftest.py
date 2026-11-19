@@ -106,3 +106,20 @@ def kubernetes_stack(stack):
     if not stack.kubernetes:
         pytest.skip("Kubernetes-only test (the stack is Docker Compose)")
     return stack
+
+
+# -- app side (request + matching service) ------------------------------------------------------
+
+@pytest.fixture
+def app(_reachable):
+    """The client API of the running stack (scripts/_demo_app.py: the same helpers the
+    demos use). Skips if the request service isn't reachable. Starts every test with
+    the Port Blair test area emptied of responders left over from earlier runs."""
+    import _demo_app
+
+    try:
+        _demo_app.api.get("/health").raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"no request service at {_demo_app.API_URL} ({exc}); start the stack first")
+    _demo_app.retire_leftovers()
+    return _demo_app

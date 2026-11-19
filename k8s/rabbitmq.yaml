@@ -1,0 +1,53 @@
+# [B] RabbitMQ: the queue between the request service and the matching service.
+#
+# One replica, no persistent volume: the queue lives in the pod. If the pod is
+# deleted, Kubernetes starts a new one and the services reconnect by themselves
+# (the matching consumer retries every 3 s), but messages still waiting in the
+# queue at that moment are lost. Durable storage (a StatefulSet with a volume)
+# is on the roadmap, not needed for the spec demos.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: emergency
+  labels: {app: rabbitmq}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: rabbitmq}
+  template:
+    metadata:
+      labels: {app: rabbitmq}
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management
+          ports:
+            - {name: amqp, containerPort: 5672}
+            - {name: management, containerPort: 15672} # UI: kubectl port-forward -n emergency svc/rabbitmq 15672
+          readinessProbe:
+            exec: {command: ["rabbitmq-diagnostics", "-q", "ping"]}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            exec: {command: ["rabbitmq-diagnostics", "-q", "ping"]}
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq # -> amqp://guest:guest@rabbitmq:5672/ (see configmap.yaml)
+  namespace: emergency
+spec:
+  selector: {app: rabbitmq}
+  ports:
+    - {name: amqp, port: 5672, targetPort: 5672}
+    - {name: management, port: 15672, targetPort: 15672}
