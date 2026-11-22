@@ -15,11 +15,13 @@ resource stays ASSIGNED to this request: the next attempt finds it again
 (_already_assigned) and finishes the job instead of grabbing a second one.
 """
 
+import calendar
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
-from common import config
+from common import config, metrics
 from common.models import RequestStatus, ResourceStatus, can_move_request, utc_now_iso
 from common.sharding import RESOURCE_PREFIX, request_key, resource_key
 from common.storage_client import NotFound, StorageClient, StorageError, VersionConflict
@@ -52,7 +54,28 @@ def match_request(store: StorageClient, request_id: str, max_km: float | None = 
 
     Raises NotFound (no such request), VersionConflict (the request changed
     while we worked: safe to try again) or StorageUnavailable.
+
+    Every call is counted in spd_match_outcomes_total (matched, unmatched, skipped,
+    conflict, not_found, or error for anything else) and timed in spd_match_seconds.
     """
+    started = time.perf_counter()
+    outcome = "error"
+    try:
+        result = _match(store, request_id, max_km)
+        outcome = result.outcome
+        return result
+    except VersionConflict:
+        outcome = "conflict"
+        raise
+    except NotFound:
+        outcome = "not_found"
+        raise
+    finally:
+        metrics.MATCH_OUTCOMES.labels(outcome=outcome).inc()
+        metrics.MATCH_SECONDS.observe(time.perf_counter() - started)
+
+
+def _match(store: StorageClient, request_id: str, max_km: float | None) -> MatchResult:
     max_km = config.MAX_MATCH_KM if max_km is None else max_km
     request = store.get(request_key(request_id))
 
@@ -60,12 +83,14 @@ def match_request(store: StorageClient, request_id: str, max_km: float | None = 
     # cancelled...) means a duplicate message or a late call: do nothing.
     if request["status"] not in (RequestStatus.PENDING, RequestStatus.UNMATCHED):
         return MatchResult("skipped", request)
+    first_try = request["status"] == RequestStatus.PENDING  # a retry's age says nothing about matching speed
     if request["status"] == RequestStatus.UNMATCHED:  # a retry: the state machine says go via PENDING
         request = _save_request(store, request, RequestStatus.PENDING)
 
     resource = _already_assigned(store, request_id) or _claim_nearest(store, request, max_km)
     if resource is None:
         saved = _save_request(store, request, RequestStatus.UNMATCHED)
+        _observe_end_to_end(request, first_try)
         return MatchResult("unmatched", saved)
 
     try:
@@ -75,7 +100,21 @@ def match_request(store: StorageClient, request_id: str, max_km: float | None = 
         # resource back, unless another matcher already saved the request with it.
         _release_unless_used(store, request_id, resource)
         raise
+    _observe_end_to_end(request, first_try)
     return MatchResult("matched", saved, resource)
+
+
+def _observe_end_to_end(request: dict[str, Any], first_try: bool) -> None:
+    """spd_match_e2e_seconds: how long the request waited from creation to its answer."""
+    if not first_try:
+        return
+    created = request.get("created_ts")  # set by the request service, with sub-second precision
+    if not isinstance(created, (int, float)):
+        try:  # records from before created_ts: whole seconds only
+            created = calendar.timegm(time.strptime(request["created_at"], "%Y-%m-%dT%H:%M:%SZ"))
+        except (KeyError, TypeError, ValueError):
+            return
+    metrics.MATCH_E2E_SECONDS.observe(max(0.0, time.time() - created))
 
 
 def _claim_nearest(store: StorageClient, request: dict[str, Any], max_km: float) -> dict[str, Any] | None:

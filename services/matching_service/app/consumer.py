@@ -19,7 +19,7 @@ import threading
 
 import pika
 
-from common import config
+from common import config, metrics
 from common.messaging import (
     EXCHANGE, PUBLISH_PROPERTIES, QUEUE, ROUTING_KEY, declare_topology, decode_message, encode_message,
 )
@@ -90,6 +90,7 @@ class Consumer:
             request_id, attempt = decode_message(body)
         except ValueError as exc:
             log.error("unreadable message, sending to the dead-letter queue: %s", exc)
+            metrics.DEAD_LETTERED.inc()
             channel.basic_nack(delivery_tag, requeue=False)
             return
 
@@ -109,6 +110,7 @@ class Consumer:
     def _retry_or_dead_letter(self, channel, delivery_tag: int, request_id: str, attempt: int) -> None:
         if attempt >= self._max_attempts:
             log.error("%s: giving up after %d attempts, sending to the dead-letter queue", request_id, attempt)
+            metrics.DEAD_LETTERED.inc()
             channel.basic_nack(delivery_tag, requeue=False)
             return
         # Publish the retry BEFORE acknowledging the old copy: a crash in between
