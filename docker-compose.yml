@@ -80,6 +80,7 @@ services:
     image: ui-service
     environment:
       API_URL: http://request-service:8000
+      GRAFANA_URL: http://localhost:3000 # as the browser reaches it, for the Telemetry view and links
     depends_on:
       request-service: {condition: service_healthy}
     ports:
@@ -116,6 +117,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true" # open the dashboard without logging in (read-only); admin / admin to edit
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/spd.json
+      GF_SECURITY_ALLOW_EMBEDDING: "true" # the Delta Command page shows it in its Telemetry view
     volumes: # the data source and the dashboard are files, so there is nothing to click
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro

@@ -54,6 +54,7 @@ spec:
             - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"} # open without logging in (read-only); admin / admin to edit
             - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Viewer}
             - {name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH, value: /var/lib/grafana/dashboards/spd.json}
+            - {name: GF_SECURITY_ALLOW_EMBEDDING, value: "true"} # the Delta Command page shows it in its Telemetry view
           ports:
             - containerPort: 3000
           readinessProbe:

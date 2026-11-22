@@ -1,0 +1,11 @@
+# Keep the build context small: every image is built from the repo root.
+.git
+.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+.pytest_cache
+services/ui_service/app/static
+loadtest/results
+slides-reference
+*.pdf

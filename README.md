@@ -28,7 +28,7 @@ Built for the CS838 cloud course project. The shared data contract is in
 |---|---|---|
 | **Request service** | Client REST API: validates input, saves requests and resources, queues "please match this" messages | Python 3.12, FastAPI, Uvicorn, pydantic v2, httpx, pika |
 | **RabbitMQ** | Holds pending work between the two services | `rabbitmq:3.13-management`, AMQP |
-| **Web page** (`ui_service`) | Delta Command: a live dashboard and demo controls; talks to the request service over HTTP | Python 3.12, NiceGUI (no JavaScript to write) |
+| **Web page** (`ui_service`) | Delta Command: a live dashboard and demo controls; talks to the request service over HTTP | Svelte 5 + Vite page, served by Python 3.12 FastAPI |
 | **Matching service** | Takes one message at a time and matches the request; also serves `POST /match/{id}` | Python, FastAPI, pika, httpx, a background consumer thread |
 | **Coordinator** | The only door to storage: picks the shard, writes to the leader, copies to the replica, fails over, catches nodes up | Python, FastAPI, async httpx |
 | **Storage nodes** (6) | One SQLite file each; versioned records with compare-and-set | Python, FastAPI, SQLite (WAL, `synchronous=FULL`) |
@@ -55,7 +55,7 @@ services/
   coordinator/        registry, router, recovery (and an in-memory fake used by the unit tests)
   request_service/    client API (schemas, service rules, RabbitMQ publisher)
   matching_service/   matcher, geo, RabbitMQ consumer, sweeper
-  ui_service/         the Delta Command web page (NiceGUI)
+  ui_service/         the Delta Command web page (Svelte app in web/, FastAPI server in app/)
 client/cli.py         command-line client
 k8s/                  Kubernetes manifests (apply with kustomize); k8s/observability/ is Prometheus + Grafana
 observability/        Prometheus config, Grafana data source and dashboard, RabbitMQ plugin list
@@ -132,19 +132,35 @@ Docker Compose has no KEDA: there the count is fixed with `--scale`.
 
 ## The Delta Command web page
 
-Open **http://localhost:8081** (Compose or Kubernetes). It refreshes by itself every second.
-From top to bottom it follows the path of a request:
+Open **http://localhost:8081** (Compose or Kubernetes). It is live: the server pushes a new
+picture to the browser (Server-Sent Events) as soon as anything changes, checking every second.
+It has three views; press `1`, `2`, `3` to switch, `?` for the briefing.
+
+**Command** is the console. The five parts of the system each keep an S.P.D. squad number and
+color everywhere on the page: 1 red request service, 2 blue coordinator, 3 green storage,
+4 yellow queue, 5 pink matcher. A request's color says whose hands it is in: yellow on the
+queue, pink once the matcher paired it, cyan while the responder is on the way, green when done.
 
 | Panel | What it shows |
 |---|---|
-| Storage cluster | The 3 shards and their primary and replica: state (UP, RECOVERING, DOWN), the current leader, key counts, and what a returning node copied. Each node has a **Pause** button that simulates a failure, and **Resume** to bring it back. |
-| Matching: the queue | Messages waiting, matchers connected (one per matching pod: it changes when you scale), and dead-lettered messages. Shows "RabbitMQ unreachable" if the broker is down. |
-| Matching: requests by stage | Counters for PENDING, MATCHED, IN PROGRESS and FULFILLED (plus UNMATCHED and CANCELLED) that update as requests move. |
-| What just happened | A running log: new requests, `PENDING -> MATCHED`, responders becoming `ASSIGNED`, nodes going DOWN, leaders changing. |
-| Report an emergency / Register a responder | Forms with city presets (the seed data's cities). The confirmation says which shard stored the record. |
-| Responders | Who is assigned to what: each responder's status, its shard, and the request it is serving with that request's stage. Assigned rows are highlighted. |
-| Emergency requests | Active requests first, newest on top; a request that is fulfilled or cancelled drops below the "Finished" divider. Each row has a progress bar (PENDING, MATCHED, IN PROGRESS, FULFILLED), its shard, and the action buttons that are valid for its status. |
-| Stress test | Sends 20 random requests at once, so you can watch the queue fill and drain. |
+| Mission flow | The five parts in the order a request meets them, each with its live number (requests on file, shards serving, nodes answering, messages waiting, matchers connected). When something happens, the parts it passed through light up one after the other. Click one to read what it does. |
+| Dispatch console | Report an emergency, register a responder (city presets match the seed data), or send a stress test of 20 requests. The confirmation says which shard stored the record. |
+| Storage vault | The 3 shards and their primary and replica: state, the leader (crown), key counts, whether the two copies are in sync, and what a returning node copied. **Pause** simulates a crash; **Resume** brings the node back. |
+| Requests board | A stage bar and counters (PENDING, MATCHED, IN PROGRESS, FULFILLED, UNMATCHED, CANCELLED) that also filter the list; search by id, type, geohash cell or responder. Active requests first, each with its 4-step progress bar, shard, responder and only the buttons the API allows. |
+| Comms log | What just happened, each line tagged with the part of the system that did it; filter by kind. |
+| Responders | Assigned first, with the request each one serves and its stage; then available, then offline. |
+| Patrol grid | Requests (dots) and responders (squares) on the geohash cells the matcher searches; lit cells hold open requests and a pink line joins each matched pair. |
+
+Every panel has a **?** that says what it shows and links to the briefing.
+
+**Telemetry** shows the Grafana dashboard inside the page (time range 5 min to 6 h), with links
+to Grafana, Prometheus, the RabbitMQ console and the API docs. Grafana must allow embedding
+(`GF_SECURITY_ALLOW_EMBEDDING=true`, set in Compose and `k8s/observability/grafana.yaml`); the
+page reaches it at `GRAFANA_URL` (default `http://localhost:3000`, as the browser sees it).
+
+**Briefing** explains each part of the system, every operation step by step (which part does
+what, the API call, what to watch on the page and which Grafana panels show it), and three demo
+playbooks (failover drill, surge, one request end to end) whose steps jump to the right panel.
 
 **Shard chips.** Every request and responder shows `S0`, `S1` or `S2`: the shard that stores it
 (the same `sha1(key) mod 3` rule the coordinator uses). When a node of that shard is down the
@@ -158,8 +174,18 @@ their effect.
 
 The Pause and Resume buttons only work when `DEMO_CONTROLS=true`, which Compose and the
 Kubernetes ConfigMap set. It is off by default because anyone who can reach the API could
-otherwise take storage nodes down. The page runs as a single pod (it keeps each open tab's
-state in memory).
+otherwise take storage nodes down. The page runs as a single pod: it polls the request service
+only while a tab is open, and keeps the feed in memory.
+
+**Working on the page.** It is a Svelte 5 app in `services/ui_service/web`, built into
+`services/ui_service/app/static` and served by a small FastAPI server
+(`services/ui_service/app`). The Docker image builds it; to work on it locally:
+
+```
+cd services/ui_service/web && npm ci && npm run build        # once, or after changes
+cd .. && uvicorn app.main:app --port 8081                       # with ../ on PYTHONPATH, API_URL set
+npm run dev                                                     # optional: hot reload on :5173
+```
 
 ## Metrics and the Grafana dashboard
 
@@ -302,7 +328,7 @@ The integration tests skip themselves when no stack is reachable.
 - **Stateless app services as Deployments, storage and RabbitMQ as StatefulSets.** App pods
   are interchangeable. Storage pods and the broker need a stable name and their own disk,
   so a restarted node gets its data back and queued messages survive a broker restart.
-- **The web page is its own small service, written in Python.** It uses only the public REST API (plus two read-only calls and the demo controls), so it can be removed without touching anything else. NiceGUI keeps the project single-language.
+- **The web page is its own small service.** Its server uses only the public REST API (plus two read-only calls and the demo controls), so it can be removed without touching anything else. The page is Svelte (compiled, about 50 KB of JavaScript gzipped, fonts bundled so it works offline); everything it knows about the system (shards, allowed moves, the feed) is computed in Python and unit-tested.
 - **Health probes everywhere.** Compose waits for healthy dependencies; Kubernetes only
   sends traffic to ready pods and restarts stuck ones.
 
