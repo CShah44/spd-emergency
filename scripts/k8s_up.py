@@ -10,9 +10,10 @@ It does what you would otherwise type by hand:
   2. build the five service images and pull RabbitMQ
   3. start minikube (a Kubernetes cluster that runs inside one Docker container)
   4. (--fresh only) delete the old system and its stored data
-  5. load the images into it and `kubectl apply -k k8s`
-  6. wait until every pod is ready and all six storage nodes are UP
-  7. start the port-forward in the background (the same ports as Docker Compose)
+  5. install KEDA (needs internet the first time), which scales the matchers on the queue length
+  6. load the images into it and `kubectl apply -k k8s`, then the KEDA scaler (k8s/keda)
+  7. wait until every pod is ready and all six storage nodes are UP
+  8. start the port-forward in the background (the same ports as Docker Compose)
 
 Safe to run again: whatever is already done is skipped. Stop with scripts/k8s_down.py.
 """
@@ -57,6 +58,18 @@ def start_cluster() -> None:
     k.run("minikube", "start", "--driver=docker", "--cpus=4", "--memory=4096")
 
 
+def install_keda() -> None:
+    k.step(f"Installing KEDA {k.KEDA_VERSION} (scales the matchers on the queue length)")
+    present = k.run("kubectl", "-n", "keda", "get", "deploy", "keda-operator", check=False, quiet=True).returncode == 0
+    if present:
+        print("   already installed")
+    else:
+        # --server-side: KEDA's CRDs are too big for the usual client-side apply
+        k.run("kubectl", "apply", "--server-side", "-f", k.KEDA_URL, quiet=True)
+    for name in k.KEDA_DEPLOYMENTS:
+        k.run("kubectl", "-n", "keda", "rollout", "status", f"deploy/{name}", "--timeout=300s", quiet=True)
+
+
 def load_images() -> None:
     k.step("Loading the images into the cluster")
     for image in k.BUILT_IMAGES + [k.RABBITMQ_IMAGE]:
@@ -79,6 +92,7 @@ def deploy(rebuilt: bool) -> None:
     ).stdout
     subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest, text=True, check=True, cwd=k.ROOT, capture_output=True)
     k.run("kubectl", "apply", "-k", "k8s")
+    k.run("kubectl", "apply", "-f", "k8s/keda", quiet=True)  # needs KEDA's CRD, so it is not in the kustomization
     if existed and rebuilt:
         # Same image tag, new content: Kubernetes won't notice, so restart our own pods.
         print("   restarting the service pods to pick up the rebuilt images", flush=True)
@@ -127,6 +141,7 @@ def main() -> int:
         if args.fresh:
             k.step("Starting fresh: deleting the old system and all its stored data")
             k.wipe_data()
+        install_keda()
         if not args.skip_build:
             load_images()
         deploy(rebuilt=not args.skip_build)
@@ -153,6 +168,7 @@ def main() -> int:
         "   Grafana dashboard       : http://localhost:3000\n"
         "   Prometheus              : http://localhost:9090\n"
         "   Pods                    : kubectl -n emergency get pods\n"
+        "   Matchers (1 to 5)       : kubectl -n emergency get scaledobject,hpa\n"
         "   Stop everything         : python scripts/k8s_down.py"
     )
     return 0

@@ -1,7 +1,9 @@
 # [B] The matching service: Deployment + Service.
 #
 # Each replica runs a RabbitMQ consumer (one message at a time), so more
-# replicas drain the queue faster:  kubectl scale deploy/matching-service -n emergency --replicas=4
+# replicas drain the queue faster. KEDA sets how many there are, from the queue length
+# (k8s/keda/matching-scaledobject.yaml: 1 to 5), which is why `replicas` is not set below.
+# To fix the number by hand, pause KEDA at it (see that file) instead of `kubectl scale`.
 # Delete a pod and the Deployment replaces it; a message that pod had not
 # finished is handed to another replica, because it is acknowledged only after matching.
 # The Service is for POST /match/{id}, which the request service forwards here.
@@ -12,7 +14,7 @@ metadata:
   namespace: emergency
   labels: {app: matching-service}
 spec:
-  replicas: 2
+  # no `replicas`: KEDA owns the count, and applying this file must not reset it
   selector:
     matchLabels: {app: matching-service}
   template:
