@@ -114,6 +114,11 @@ def create_app(
     async def admit(reg: dict[str, Any]) -> str:
         """Put a registered node into the registry; start its catch-up if needed."""
         node = registry.register(reg["node_id"], reg["shard"], reg["role"], reg["url"])
+        # Create the node's counters at 0 now: Prometheus' increase() can't see the first
+        # step of a series that is born at 1, so a node's first catch-up would be invisible.
+        for mode in ("log", "full", "alone"):
+            metrics.RECOVERIES.labels(node.node_id, mode)
+        metrics.RECOVERY_ENTRIES.labels(node.node_id)
         if node.state == RECOVERING:
             # Catch up in the background; the node is told it's RECOVERING
             # and keeps heartbeating meanwhile.

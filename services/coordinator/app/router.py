@@ -71,6 +71,8 @@ class Router:
     def __init__(self, registry: Registry, http: httpx.AsyncClient):
         self.registry = registry
         self.http = http
+        for shard in range(registry.num_shards):  # at 0 from the start (see main.admit)
+            metrics.REPLICATION_FAILURES.labels(str(shard))
 
     def shard_of(self, key: str) -> int:
         return shard_for(key, self.registry.num_shards)
