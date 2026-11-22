@@ -116,7 +116,7 @@ class Leadership:
         if set_label is None:
             return  # not on Kubernetes (tests): nothing to label
         try:
-            await set_label(self.elector.identity, self.is_leader())
+            await set_label(self.is_leader())
         except Exception as exc:  # noqa: BLE001
             log.warning("could not update the leader label: %r", exc)
 

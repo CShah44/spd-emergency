@@ -106,8 +106,9 @@ class KubernetesLeaseBackend:
 
     SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 
-    def __init__(self, name: str, namespace: str | None = None):
+    def __init__(self, name: str, pod_name: str, namespace: str | None = None):
         self.name = name
+        self.pod_name = pod_name  # our own pod, which gets the leader label
         self.namespace = namespace or _read(f"{self.SA_DIR}/namespace").strip()
         host = os.environ["KUBERNETES_SERVICE_HOST"]
         port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
@@ -143,9 +144,10 @@ class KubernetesLeaseBackend:
 
     # -- routing: the Service sends traffic to the pod labelled as leader ---------------
 
-    async def set_leader_label(self, pod: str, leader: bool) -> None:
+    async def set_leader_label(self, leader: bool) -> None:
         """Put LEADER_LABEL on our own pod (leader) or take it off (standby). On
         taking over, also take it off any other pod still carrying it."""
+        pod = self.pod_name
         await self._patch_label(pod, leader)
         if leader:
             resp = await self._http.get(
@@ -228,6 +230,7 @@ class LeaderElector:
         self._clock = clock
         self.epoch: int | None = None
         self._leading = False
+        self._announced = False  # the last state reported through on_change
         self._last_renew = float("-inf")
         self._observed: Lease | None = None
         self._observed_at = float("-inf")
@@ -247,8 +250,12 @@ class LeaderElector:
             await asyncio.sleep(self.retry_period_s)
 
     async def tick(self) -> None:
-        """One round: acquire or renew, then report a change of leadership."""
-        was_leading = self.is_leader()
+        """One round: acquire or renew, then report a change of leadership.
+
+        A change is judged against what we last ANNOUNCED, not against
+        is_leader() before this round: after a freeze, is_leader() has already
+        turned False by the clock, and the loss must still be announced (so the
+        coordinator drops its registry and its leader label)."""
         try:
             renewed = await self._try_acquire_or_renew()
         except LeaseConflict:
@@ -262,12 +269,12 @@ class LeaderElector:
         elif renewed is False:
             self._leading = False
         leading = self.is_leader()
-        if leading != was_leading:
+        if leading != self._announced:
             await self._notify(leading)
 
     async def step_down(self, reason: str) -> None:
         """Stop acting as leader now (a storage node said our epoch is old)."""
-        if self._leading:
+        if self._leading or self._announced:
             log.warning("stepping down: %s", reason)
             self._leading = False
             await self._notify(False)
@@ -278,7 +285,7 @@ class LeaderElector:
         self._stopped = True
         if not self._leading:
             return
-        self._leading = False
+        self._leading = self._announced = False
         try:
             lease = await self.backend.get()
             if lease is not None and lease.holder == self.identity:
@@ -313,6 +320,7 @@ class LeaderElector:
         return True
 
     async def _notify(self, leading: bool) -> None:
+        self._announced = leading
         if self.on_change is not None:
             result = self.on_change(leading, self.epoch)
             if asyncio.iscoroutine(result):

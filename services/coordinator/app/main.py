@@ -18,6 +18,7 @@ import contextlib
 import logging
 import os
 import socket
+import uuid
 from typing import Any, Literal
 
 import httpx
@@ -34,6 +35,9 @@ from .registry import RECOVERING, Registry, RegistrationError
 from .router import AmbiguousWrite, Fenced, NoLiveNode, NodeAnswer, Router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+# httpx logs every request at INFO: one line per node call and per lease renewal
+# (every second), which buries the lines that matter. Its warnings still show.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("coordinator")
 
 EPOCH_HEADER = "X-Coordinator-Epoch"
@@ -63,9 +67,12 @@ def _elector_from_env() -> LeaderElector | None:
         return None
     if mode != "kubernetes":
         raise ValueError(f"LEADER_ELECTION must be off or kubernetes, got {mode!r}")
+    pod = os.environ.get("POD_NAME") or socket.gethostname()
     return LeaderElector(
-        KubernetesLeaseBackend(os.environ.get("LEASE_NAME", "coordinator-leader")),
-        identity=os.environ.get("POD_NAME") or socket.gethostname(),
+        KubernetesLeaseBackend(os.environ.get("LEASE_NAME", "coordinator-leader"), pod_name=pod),
+        # Pod name + a per-process suffix: a container that crashed and restarted in
+        # the same pod is a NEW candidate, so if it wins again it gets a new epoch.
+        identity=f"{pod}_{uuid.uuid4().hex[:6]}",
         lease_duration_s=_env_float("LEASE_DURATION_S", 6.0),
         renew_deadline_s=_env_float("RENEW_DEADLINE_S", 4.0),
         retry_period_s=_env_float("RETRY_PERIOD_S", 1.0),

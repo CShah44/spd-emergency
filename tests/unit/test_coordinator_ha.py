@@ -80,6 +80,22 @@ def test_leader_cut_off_from_the_lease_api_steps_down_before_the_lease_expires()
     assert not a.is_leader()  # past the deadline, and the lease (6 s) hasn't even expired yet
 
 
+def test_a_leader_that_froze_announces_it_lost():
+    """Found on Kubernetes (docker pause): after waking up, is_leader() was already
+    False by the clock, so 'before vs after' saw no change and the coordinator never
+    dropped its registry or its leader label."""
+    lease, clock = MemoryLeaseBackend(), Clock()
+    events = []
+    a, b = _elector(lease, "a", clock), _elector(lease, "b", clock)
+    a.on_change = lambda leading, epoch: events.append((leading, epoch))
+    _tick(a, b)
+    clock.now += 7  # a is frozen; b takes over
+    _tick(b)
+    assert b.is_leader()
+    _tick(a)  # a wakes up
+    assert events == [(True, 0), (False, 0)]
+
+
 def test_two_standbys_cannot_both_take_an_expired_lease():
     lease, clock = MemoryLeaseBackend(), Clock()
     a, b, c = (_elector(lease, n, clock) for n in "abc")
