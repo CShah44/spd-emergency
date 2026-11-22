@@ -37,6 +37,49 @@ a parent's edge. Whatever A picks, the test is the measured `spd_shards_per_quer
 The price is the hot spot already described in the plan: a big region lands on one shard.
 Measure keys per shard after seeding and report it next to the speed-up.
 
+## A's decision: regions on a consistent-hash ring (built)
+
+Simulated on the five cities the seed data and the load test use (2,000 requests jittered
+around Bengaluru, Mumbai, Chennai, Kolkata and Ahmedabad), average **shards asked per match**:
+
+| Cell -> shard rule | All 9 cells | Only cells within 50 km |
+|---|---:|---:|
+| `sha1(cell) mod 3` | 3.00 | 1.75 |
+| `sha1(region) mod 3` (region = first 2 characters) | 1.60 | **1.20** |
+| region on a consistent-hash ring (built) | 1.60 | **1.20** |
+
+How the five cities fall on the 3 shards: per-cell hashing leaves one shard **empty**
+(cities 2 / 0 / 3); by region, one shard holds 3 of the 5 (1 / 3 / 1 with the ring). With five
+cities the best possible is 2 / 2 / 1, so a hot spot is unavoidable at this scale: report the
+measured keys per shard next to the speed-up, as said above.
+
+Why a ring rather than `mod 3` for regions, when both score the same: with the ring, a 4th
+shard takes over about a quarter of the regions and nothing else moves; with `mod`, most
+regions would change shard (`test_adding_a_fourth_shard_moves_only_what_the_new_shard_takes`).
+Moving the data itself when a shard is added (a live rebalance) is not built.
+
+What exists now (A):
+- `sharding.shard_for(key)`: region ring for keys whose id has a cell, `sha1(key) mod 3`
+  otherwise. Also `shard_for_cell`, `shards_for_cells`, `key_in_cells`, `CELLS_PARAM`.
+- `StorageClient.query(prefix, cells=[...], **filters)` sends `?cells=a,b`. The coordinator
+  asks only the owning shards (`spd_shards_per_query` records how many); each storage node
+  returns only records in those cells, plus old-style records it holds. A bad cell is a 400.
+  The fake coordinator filters the same way, so B's unit tests see the same behaviour.
+- A side effect worth demonstrating: a search near Mumbai keeps working while the shard that
+  owns Chennai is entirely down. Without `cells=` that search is a 503.
+
+## What's left for B, and one recommendation
+
+1. The request service creates ids with the cell (`res-<cell>-<hex>`, `req-<cell>-<hex>`).
+2. The matcher passes `cells=` for both its lookups (free resources, and "already assigned
+   to this request").
+3. **Recommended: ask only for the cells that come within 50 km of the point**, not all 9.
+   Most of the remaining cost is the search being wider than the radius: a point in the middle
+   of a 156 km cell needs no neighbour at all. On the five cities this takes shards per match
+   from 1.60 to 1.20 and cells per match from 9 to about 2.9. A small helper in
+   `common/geohash.py`, e.g. `cells_near(lat, lon, km)`: keep each cell of `cells_around()`
+   whose rectangle is within `km` of the point (distance to the rectangle's nearest point).
+
 ## Rules both sides rely on
 
 - The matcher also passes `cells=` for its "is a resource already assigned to this request"

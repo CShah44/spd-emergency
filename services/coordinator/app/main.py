@@ -243,7 +243,11 @@ def create_app(
 
     @app.get("/store")
     async def query_records(request: Request) -> list[dict[str, Any]]:
-        records = await router().query(dict(request.query_params))
+        """?prefix=&field=value..., and optionally ?cells=tdr,tf2 (only the shards owning them)."""
+        try:
+            records = await router().query(dict(request.query_params))
+        except ValueError as exc:  # a malformed cells= list
+            raise HTTPException(400, detail=str(exc))
         return sorted(records, key=lambda r: str(r.get("id", "")))
 
     # -- node API (section 8.1) ---------------------------------------------------------

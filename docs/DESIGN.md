@@ -145,6 +145,7 @@ Every record has a `version` number. A change is saved **only if the version is 
 - Storage key: `request:<id>` or `resource:<id>`.
 - **Shard (cabinet) number** = `int(sha1(key).hexdigest(), 16) % 3`, giving 0, 1 or 2.
   - **Never use Python's built-in `hash()`.** It gives different answers in different programs, so the services would disagree about which cabinet holds a record.
+- **Geo-sharding (roadmap task 5, docs/GEO_SHARDING.md).** An id that carries a geohash cell (`res-<cell>-<hex>`) is placed by its **region**, the cell's first 2 characters, on a consistent-hash ring (64 spots per shard), so nearby records share a shard. Ids without a cell keep the rule above. `GET /store?cells=tdr,tf2` asks only the shards owning those cells, and each returns only records in them (plus old-style records it holds).
 - Each shard has a **primary** and a **replica**, and every write goes to both.
 
 ## 7. Message in the tray (RabbitMQ)

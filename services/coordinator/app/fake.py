@@ -25,7 +25,7 @@ from typing import Any
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Response
 
 from common.config import NUM_SHARDS
-from common.sharding import shard_for
+from common.sharding import CELLS_PARAM, key_in_cells, parse_cells, shard_for
 
 app = FastAPI(title="Coordinator (FAKE, in-memory)")
 
@@ -116,12 +116,19 @@ def query_records(request: Request, prefix: str = "") -> list[dict[str, Any]]:
     """
     # The real coordinator will send this same query to all 3 shards and merge
     # the answers (scatter-gather), because records are spread by key, not by type.
-    filters = {k: v for k, v in request.query_params.items() if k != "prefix"}
+    # With ?cells= it asks only the shards owning those cells; here (one store) that
+    # just means keeping the records in those cells (common/sharding.key_in_cells).
+    filters = {k: v for k, v in request.query_params.items() if k not in ("prefix", CELLS_PARAM)}
+    try:
+        cells = parse_cells(request.query_params.get(CELLS_PARAM))
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
     with _lock:
         matches = [
             copy.deepcopy(rec)
             for key, rec in sorted(_records.items())
             if key.startswith(prefix)
+            and key_in_cells(key, cells)
             and all(str(rec.get(field)) == value for field, value in filters.items())
         ]
     return matches

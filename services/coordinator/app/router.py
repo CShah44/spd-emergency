@@ -31,7 +31,7 @@ from urllib.parse import quote
 import httpx
 
 from common import metrics
-from common.sharding import shard_for
+from common.sharding import CELLS_PARAM, parse_cells, shard_for, shards_for_cells
 
 from .registry import Node, Registry
 
@@ -102,20 +102,28 @@ class Router:
         )
 
     async def query(self, params: dict[str, str]) -> list[dict[str, Any]]:
-        """Scatter-gather: ask every shard at the same time, then merge.
+        """Scatter-gather: ask the shards at the same time, then merge.
 
-        Needed because records are spread by a hash of their key, not by type
-        or status. If any shard has no live node we fail (503) rather than
-        return a partial list: a matcher seeing "no water resources" when one
-        shard is just unreachable would wrongly mark requests UNMATCHED.
+        Without ?cells= every shard is asked: records are spread by key, not by
+        type or status. With ?cells= (geo-sharding, docs/GEO_SHARDING.md) only
+        the shards owning those cells are asked, and each returns only records
+        in them, so "free water near X" usually touches one shard.
+
+        If an asked shard has no live node we fail (503) rather than return a
+        partial list: a matcher seeing "no water resources" when one shard is
+        just unreachable would wrongly mark requests UNMATCHED.
         """
+        cells = parse_cells(params.get(CELLS_PARAM))  # ValueError -> 400 (main.py)
+        shards = range(self.registry.num_shards) if cells is None else sorted(
+            shards_for_cells(sorted(cells), self.registry.num_shards)
+        )
 
         async def one(shard: int) -> list[dict[str, Any]]:
             _, resp = await self._first_live(shard, "GET", "/internal/data", params=params, is_write=False)
             return _ok_json(resp)
 
-        metrics.SHARDS_PER_QUERY.observe(self.registry.num_shards)
-        per_shard = await asyncio.gather(*(one(s) for s in range(self.registry.num_shards)))
+        metrics.SHARDS_PER_QUERY.observe(len(shards))
+        per_shard = await asyncio.gather(*(one(s) for s in shards))
         return [record for records in per_shard for record in records]
 
     # -- internals ---------------------------------------------------------------------------
