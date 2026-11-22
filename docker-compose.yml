@@ -65,6 +65,7 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       MATCHING_SERVICE_URL: http://matching-service:8000
       DEMO_CONTROLS: "true" # the web page's Pause / Resume buttons for storage nodes
+      GEO_SHARDING: "true" # new ids carry their geohash cell (must match matching-service)
     depends_on:
       coordinator: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
@@ -94,6 +95,7 @@ services:
       COORDINATOR_URL: http://coordinator:8000
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       MAX_MATCH_KM: "50"
+      GEO_SHARDING: "true" # look only in the request's geohash cells; "false" asks every shard (the older behaviour)
     depends_on:
       coordinator: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
