@@ -26,13 +26,14 @@ from fastapi import Body, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from common import config
+from common import config, metrics
 
 from .election import KubernetesLeaseBackend, LeaderElector, LeaseBackend
 from .leadership import Leadership
 from .recovery import recover
 from .registry import RECOVERING, Registry, RegistrationError
 from .router import AmbiguousWrite, Fenced, NoLiveNode, NodeAnswer, Router
+from .state_metrics import StateMetrics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 # httpx logs every request at INFO: one line per node call and per lease renewal
@@ -42,7 +43,7 @@ log = logging.getLogger("coordinator")
 
 EPOCH_HEADER = "X-Coordinator-Epoch"
 # Paths a standby (or a settling leader) still answers.
-ALWAYS_OPEN = ("/health", "/livez", "/ready", "/internal/leader", "/docs", "/openapi.json")
+ALWAYS_OPEN = ("/health", "/livez", "/ready", "/internal/leader", "/metrics", "/docs", "/openapi.json")
 
 
 class RegisterBody(BaseModel):
@@ -88,6 +89,7 @@ def create_app(
     recovery_mode: str | None = None,
     elector: LeaderElector | None | Literal["env"] = "env",
     settle_timeout: float | None = None,
+    pod_name: str | None = None,
 ) -> FastAPI:
     """`node_transport` lets tests route node calls to in-process apps.
     `recovery_mode`: "auto" (catch up from the operation log when possible) or
@@ -134,6 +136,10 @@ def create_app(
         cancel_recoveries,
     )
 
+    state_metrics = StateMetrics(
+        registry, leadership, lambda: router().http, pod_name or os.environ.get("POD_NAME") or socket.gethostname()
+    )
+
     async def sweeper() -> None:
         # Active failure detection: check heartbeat ages every second.
         while True:
@@ -167,7 +173,7 @@ def create_app(
         hooks = {"request": [add_epoch], "response": [check_fenced]}
         async with httpx.AsyncClient(timeout=timeout, transport=node_transport, event_hooks=hooks) as http:
             holder["router"] = Router(registry, http)
-            tasks = [asyncio.create_task(sweeper())]
+            tasks = [asyncio.create_task(sweeper()), asyncio.create_task(state_metrics.run())]
             if elector is not None:
                 tasks.append(asyncio.create_task(elector.run()))
                 tasks.append(asyncio.create_task(leadership.label_keeper()))
@@ -183,6 +189,7 @@ def create_app(
     app = FastAPI(title="Coordinator", lifespan=lifespan)
     app.state.registry = registry
     app.state.leadership = leadership
+    app.state.state_metrics = state_metrics
     app.state.recovery_mode = recovery_mode  # read at each registration, so a benchmark can switch it
 
     @app.middleware("http")
@@ -195,6 +202,10 @@ def create_app(
         if leadership.settling and path.startswith("/store"):
             return JSONResponse({"detail": "new leader is settling, retry shortly"}, status_code=503)
         return await call_next(request)
+
+    # GET /metrics and the HTTP metrics (added after leader_gate, so it runs first:
+    # a standby's 503s are counted too). /metrics is open on a standby (ALWAYS_OPEN).
+    metrics.instrument(app, "coordinator")
 
     # Translate router errors into HTTP answers, in one place.
     @app.exception_handler(NodeAnswer)

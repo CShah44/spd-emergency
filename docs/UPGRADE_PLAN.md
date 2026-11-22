@@ -44,6 +44,10 @@ Agree on these three things, merge them as one small PR (`feat/upgrade-step0`), 
 | `spd_coordinator_is_leader` | gauge (0/1) | `pod` | A | coordinator (task 3) |
 | `spd_coordinator_epoch` | gauge | `pod` | A | coordinator (task 3) |
 | `spd_shards_per_query` | histogram | | A | coordinator router (task 5) |
+| `spd_replication_lag_writes` | gauge | `shard`, `node` | A | coordinator (leader), from the operation-log positions (task 4) |
+| `spd_recovery_total` | counter | `node`, `mode` (`log`, `full`, `alone`) | A | coordinator recovery |
+| `spd_fenced_total` | counter | `node` | A | storage node: calls refused for an old epoch (task 3) |
+| `spd_coordinator_settle_seconds` | histogram | | A | coordinator: a new leader's settle step (task 3) |
 | `spd_requests_created_total` | counter | `type` | B | request service |
 | `spd_publish_failures_total` | counter | | B | request service |
 | `spd_match_outcomes_total` | counter | `outcome` | B | matcher |
