@@ -198,6 +198,7 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
     app = FastAPI(title=f"Storage node {settings.node_id}", lifespan=lifespan)
     app.state.node = state
     metrics.instrument(app, "storage-node")  # GET /metrics (503 while paused, like everything else)
+    metrics.FENCED.labels(settings.node_id)  # at 0 from the start, so increase() sees the first one
 
     def store() -> Store:
         assert state.store is not None, "store is opened in lifespan"

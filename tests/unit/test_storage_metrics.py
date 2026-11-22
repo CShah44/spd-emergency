@@ -121,6 +121,15 @@ def test_catch_up_is_counted_with_its_mode(coord, cluster):
     assert value("spd_recovery_entries_copied_total", node="s2-primary") - before_copied == 3
 
 
+def test_counters_exist_at_zero_before_the_first_event(coord, cluster):
+    """Found under chaos load: Prometheus' increase() can't see the first step of a
+    series born at 1, so the first catch-up of a node was missing from the dashboard."""
+    for node_id in cluster.node_apps:
+        assert sample("spd_recovery_total", node=node_id, mode="full") is not None
+        assert sample("spd_recovery_entries_copied_total", node=node_id) is not None
+    assert all(sample("spd_replication_failures_total", shard=s) is not None for s in "012")
+
+
 def test_queries_record_how_many_shards_they_asked(coord):
     before = value("spd_shards_per_query_count")
     coord.get("/store", params={"prefix": "resource:"})
