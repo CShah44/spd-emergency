@@ -28,5 +28,9 @@ RABBITMQ_URL: str = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost
 # App side: the request service calls the matching service for POST /match/{id}.
 MATCHING_SERVICE_URL: str = os.environ.get("MATCHING_SERVICE_URL", "http://localhost:8001")
 MATCH_TIMEOUT_S: float = _env_float("MATCH_TIMEOUT_S", 15.0)
+# Requests saved but never queued (RabbitMQ was down) are matched by a periodic sweep:
+# it looks every SWEEP_INTERVAL_S for requests PENDING longer than PENDING_STALE_AFTER_S.
+SWEEP_INTERVAL_S: float = _env_float("SWEEP_INTERVAL_S", 30.0)
+PENDING_STALE_AFTER_S: float = _env_float("PENDING_STALE_AFTER_S", 60.0)
 # A queue message that fails this many times goes to the dead-letter queue (DESIGN.md section 7).
 MAX_DELIVERY_ATTEMPTS: int = _env_int("MAX_DELIVERY_ATTEMPTS", 3)
