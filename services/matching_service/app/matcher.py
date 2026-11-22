@@ -22,7 +22,7 @@ from typing import Any
 from common import config
 from common.models import RequestStatus, ResourceStatus, can_move_request, utc_now_iso
 from common.sharding import RESOURCE_PREFIX, request_key, resource_key
-from common.storage_client import NotFound, StorageClient, VersionConflict
+from common.storage_client import NotFound, StorageClient, StorageError, VersionConflict
 
 from .geo import haversine_km
 
@@ -71,8 +71,9 @@ def match_request(store: StorageClient, request_id: str, max_km: float | None = 
     try:
         saved = _save_request(store, request, RequestStatus.MATCHED, assigned_resource_id=resource["id"])
     except VersionConflict:
-        # The request changed under us (cancelled? matched by a duplicate?). Give the resource back.
-        _release(store, resource)
+        # The request changed under us (cancelled? matched by a duplicate?). Give the
+        # resource back, unless another matcher already saved the request with it.
+        _release_unless_used(store, request_id, resource)
         raise
     return MatchResult("matched", saved, resource)
 
@@ -99,6 +100,23 @@ def _already_assigned(store: StorageClient, request_id: str) -> dict[str, Any] |
     """A resource a previous attempt claimed for this request before dying."""
     found = store.query(RESOURCE_PREFIX, status=ResourceStatus.ASSIGNED, assigned_request_id=request_id)
     return found[0] if found else None
+
+
+def _release_unless_used(store: StorageClient, request_id: str, resource: dict[str, Any]) -> None:
+    """Called after losing the race to save the request. Two matchers on the same
+    request can end up holding the SAME resource (one claimed it, the other found
+    it via _already_assigned), so the loser must check what the winner saved:
+    releasing a resource the request now points at would make it look free while
+    it is still promised, and it could then be given to a second request."""
+    try:
+        current = store.get_or_none(request_key(request_id))
+    except StorageError as exc:
+        # Can't tell: leaving it ASSIGNED is safe; freeing it could double-assign it.
+        log.warning("could not re-read %s, leaving %s assigned: %s", request_id, resource["id"], exc)
+        return
+    if current is not None and current.get("assigned_resource_id") == resource["id"]:
+        return  # the winner used this resource: it is correctly assigned
+    _release(store, resource)
 
 
 def _release(store: StorageClient, resource: dict[str, Any]) -> None:

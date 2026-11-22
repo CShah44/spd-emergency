@@ -164,6 +164,51 @@ def test_resource_is_given_back_if_the_request_changed_meanwhile(fake_store, add
     assert fake_store.get(request_key("req-1"))["status"] == "CANCELLED"
 
 
+def _assert_matched_and_assigned_to_each_other(fake_store, request_id, resource_id):
+    request = fake_store.get(request_key(request_id))
+    resource = fake_store.get(resource_key(resource_id))
+    assert request["status"] == "MATCHED" and request["assigned_resource_id"] == resource_id
+    assert resource["status"] == "ASSIGNED" and resource["assigned_request_id"] == request_id
+
+
+def test_same_request_matched_twice_loser_found_the_winners_resource(fake_store, add_resource, add_request):
+    # Two matchers on ONE request (queue consumer + POST /match, sweeper, or a
+    # duplicate message). B has read the request; A then matches it completely.
+    # B finds A's resource as "already assigned", loses the save, and must NOT
+    # give A's resource back.
+    add_resource("res-1")
+    add_request("req-1")
+    ran = []
+
+    def let_a_finish_first(method, args):
+        if method == "query" and not ran:
+            ran.append(1)
+            assert match_request(fake_store, "req-1").outcome == "matched"  # A
+
+    with pytest.raises(VersionConflict):
+        match_request(_Racer(fake_store, let_a_finish_first), "req-1")  # B
+
+    _assert_matched_and_assigned_to_each_other(fake_store, "req-1", "res-1")
+
+
+def test_same_request_matched_twice_loser_claimed_the_resource(fake_store, add_resource, add_request):
+    # The other order: A claims res-1, then B finds it as "already assigned" and
+    # saves the request first. A loses the save and must NOT release res-1.
+    add_resource("res-1")
+    add_request("req-1")
+    ran = []
+
+    def let_b_save_first(method, args):
+        if method == "put_if_version" and args[0] == request_key("req-1") and not ran:
+            ran.append(1)
+            assert match_request(fake_store, "req-1").outcome == "matched"  # B
+
+    with pytest.raises(VersionConflict):
+        match_request(_Racer(fake_store, let_b_save_first), "req-1")  # A
+
+    _assert_matched_and_assigned_to_each_other(fake_store, "req-1", "res-1")
+
+
 def test_retry_after_a_crash_reuses_the_resource_it_already_claimed(fake_store, add_resource, add_request):
     # The matcher died after claiming res-1 but before saving the request.
     add_resource("res-1", lat=13.05, status="ASSIGNED", assigned_request_id="req-1")
