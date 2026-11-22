@@ -188,12 +188,17 @@ Storage node API. Only the coordinator calls these.
 | `GET /internal/data/{key}` | One live record | 200, 404 |
 | `DELETE /internal/data/{key}` | Leaves a **tombstone** (`deleted=1`, new version) | 200 `{key, version, deleted}`, 404 |
 | `GET /internal/data?prefix=&<field>=` | Search live records on this node | 200 list |
-| `PUT /internal/replicate/{key}` body `{version, deleted, record}` | Store exactly this version **only if newer** than what the node holds | 200 `{applied, version}` |
-| `GET /internal/sync?prefix=` | Every entry including tombstones, for recovery | 200 `{node_id, entries}` |
+| `PUT /internal/replicate/{key}` body `{version, deleted, record, origin?}` | Store exactly this version **only if newer** than what the node holds. `origin {log_id, seq}` says where the write sits in the writing node's log | 200 `{applied, version}` |
+| `POST /internal/replicate-batch` body `{entries, origin?}` | The same for many entries in one transaction (recovery). `origin {log_id, through}` moves the watermark | 200 `{received, applied, conflicts}` |
+| `GET /internal/sync?prefix=` | Every entry including tombstones, for a full sync | 200 `{node_id, entries}` |
+| `GET /internal/oplog/position` | This node's log id and head seq, and its watermark for each partner log | 200 |
+| `GET /internal/oplog?after=N&limit=` | This node's own writes after seq N, each with the key's current value | 200 `{log_id, head, entries}` |
 | `GET /health` | Identity and key count; 503 while paused | 200 / 503 |
 | `POST /admin/pause`, `/admin/resume` | Simulate a failure (demos) | 200 |
 
 Node → coordinator: `POST /internal/nodes/register {node_id, shard, role, url}` on startup and after a pause, then `POST /internal/nodes/heartbeat {node_id}` every 3 s. A 404 to a heartbeat means "register again".
+
+Client writes answer with `X-Log-Id` and `X-Log-Seq` headers; the coordinator passes them on as `origin` with the replica copy.
 
 Rules: versions keep counting past a tombstone (deleted v3 → recreated v4). Replication and recovery both use "newer version wins", never timestamps, because container clocks can disagree.
 
@@ -205,7 +210,10 @@ Rules: versions keep counting past a tombstone (deleted v3 → recreated v4). Re
 | `RECOVERING` | no | yes |
 | `DOWN` | no | no |
 
-- A node that registers while its partner is `UP` starts `RECOVERING`. The coordinator compares both nodes' `/internal/sync`, copies each side's newer entries to the other (`POST /internal/replicate-batch`), and then marks it `UP`. With no `UP` partner, it starts `UP` on its own data.
+- A node that registers while its partner is `UP` starts `RECOVERING`. The two nodes catch up in both directions, then it is marked `UP`. With no `UP` partner, it starts `UP` on its own data.
+- **Operation log (normal catch-up).** Every client write on a node gets the next sequence number (seq) in that node's log; the log keeps each key's latest seq. Each node also keeps a **watermark** per partner log: "I have every write of that log up to seq N". It only moves over seqs actually received, so a missed write holds it back and is fetched next time. Catch-up sends each side only its own writes after the other's watermark (`/internal/oplog?after=N`), so the work follows how long the node was gone, not the size of the data.
+- **Full sync (fallback).** Compare both nodes' `/internal/sync` and copy each side's newer entries. Used when the two have no watermark for each other's current log: the first sync of a new cluster, a node whose disk was wiped (a new database gets a new log id), or `RECOVERY_MODE=full` on the coordinator. It sets the watermarks, so the next catch-up uses the log.
+- `/internal/status` shows each node's last catch-up: `mode` (`log` or `full`, with `why_full`), `pulled`, `pushed`, `entries_read`, `conflicts`, `seconds`. Benchmark: `python scripts/bench_catchup.py`.
 - A `DOWN` node's heartbeats get 404, so it must register again, which means it always catches up before serving again.
 - **Leadership is sticky:** the leader keeps the shard while it is `UP`. After a failover the replica keeps leading even when the old primary is back. Leadership moves only when the leader fails, so two nodes never accept compare-and-set writes for the same shard at once.
 
