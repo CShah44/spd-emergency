@@ -167,8 +167,9 @@ def main() -> int:
     p.add_argument("--skip-seed", action="store_true", help="don't register responders (use what is there)")
     p.add_argument("--scenario", choices=list(chaos.SCENARIOS), help="break something during the load (scripts/chaos.py)")
     p.add_argument("--chaos-at", type=float, default=10, help="seconds into the load when the scenario starts (default 10)")
-    p.add_argument("--drain", type=float, help="seconds to wait for answers after the load stops (default 60, or 180 with a scenario: "
-                   "requests saved while RabbitMQ was down are only rescued by the sweeper after a minute or two)")
+    p.add_argument("--drain", type=float, default=900, help="most seconds to wait for answers after the load stops (default 900)")
+    p.add_argument("--stall", type=float, default=150, help="give up on the unanswered ones when no answer has arrived for this "
+                   "long (default 150: longer than the sweeper needs to rescue requests that were saved but never queued)")
     p.add_argument("--api", default=os.environ.get("API_URL", "http://localhost:8080"))
     p.add_argument("--prometheus", default=os.environ.get("PROMETHEUS_URL", "http://localhost:9090"))
     p.add_argument("--label", help="name of the scenario in the result row (default: the scenario, or 'steady')")
@@ -176,7 +177,6 @@ def main() -> int:
     p.add_argument("--allow-dirty", action="store_true", help="run even if old PENDING requests exist")
     args = p.parse_args()
     args.label = args.label or args.scenario or "steady"
-    args.drain = args.drain if args.drain is not None else (180 if args.scenario else 60)
 
     try:
         preflight(args.api, args.prometheus, args.allow_dirty)
@@ -205,7 +205,7 @@ def main() -> int:
         ids = [line.strip() for line in open(ids_file) if line.strip()] if ids_file.exists() else []
         print(f">> load finished: {post['sent']} sent, {post['refused']} refused; checking every accepted request", flush=True)
 
-        report = verify.verify(args.api, ids, args.drain)
+        report = verify.verify(args.api, ids, args.drain, args.stall)
         time.sleep(SCRAPE_WAIT_S)
         latency = match_latency(args.prometheus, int(time.time() - started) + 5)
     except Abort as exc:

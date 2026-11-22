@@ -2,6 +2,7 @@
 If this check were wrong, every "lost requests = 0" number would be meaningless."""
 
 import itertools
+import time
 
 from loadtest import verify
 from loadtest.run import match_latency, result_row, seconds
@@ -119,6 +120,33 @@ def test_a_missing_request_is_not_asked_about_again():
     results = verify.fetch_answers(["r1"], get, wait_s=5, interval_s=0)
 
     assert results["r1"] == "missing" and seen == ["r1"]
+
+
+def test_waiting_goes_on_while_answers_keep_arriving():
+    """A slow backlog is not a loss: while answers keep arriving it keeps waiting, and ends with everything answered."""
+    ids = [f"r{n}" for n in range(1, 9)]
+    # one more request gets answered on every pass
+    state = {"answered": 0}
+
+    def slowly(request_id):
+        number = int(request_id[1:])
+        if number <= state["answered"]:
+            return req(request_id, "MATCHED", "x")
+        if number == state["answered"] + 1:
+            state["answered"] += 1
+        return req(request_id, "PENDING")
+
+    results = verify.fetch_answers(ids, slowly, wait_s=30, interval_s=0.01, stall_s=0.5)
+
+    assert all(r["status"] == "MATCHED" for r in results.values())
+
+
+def test_waiting_stops_once_nothing_has_been_answered_for_the_stall_time():
+    started = time.monotonic()
+
+    results = verify.fetch_answers(["r1"], lambda rid: req(rid, "PENDING"), wait_s=30, interval_s=0.01, stall_s=0.1)
+
+    assert results["r1"]["status"] == "PENDING" and time.monotonic() - started < 5
 
 
 # -- the result row --------------------------------------------------------------------------------------
