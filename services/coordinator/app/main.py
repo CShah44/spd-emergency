@@ -4,12 +4,21 @@ the app services can't tell the difference, plus the node-facing calls
 
 Run locally (with storage nodes pointing COORDINATOR_URL here):
     uvicorn coordinator.app.main:app --app-dir services --port 8000
+
+High availability (roadmap task 3): with LEADER_ELECTION=kubernetes, run two
+replicas. They elect a leader through a Kubernetes Lease (election.py); only
+the leader serves, and it labels its pod so the Service routes to it
+(leadership.py). Every call to a storage node carries the leader's epoch
+(X-Coordinator-Epoch), and nodes refuse an older one: fencing. With
+LEADER_ELECTION=off (the default) it is a single coordinator, as before.
 """
 
 import asyncio
 import contextlib
 import logging
 import os
+import socket
+import uuid
 from typing import Any, Literal
 
 import httpx
@@ -19,12 +28,21 @@ from pydantic import BaseModel
 
 from common import config
 
+from .election import KubernetesLeaseBackend, LeaderElector, LeaseBackend
+from .leadership import Leadership
 from .recovery import recover
 from .registry import RECOVERING, Registry, RegistrationError
-from .router import AmbiguousWrite, NoLiveNode, NodeAnswer, Router
+from .router import AmbiguousWrite, Fenced, NoLiveNode, NodeAnswer, Router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+# httpx logs every request at INFO: one line per node call and per lease renewal
+# (every second), which buries the lines that matter. Its warnings still show.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("coordinator")
+
+EPOCH_HEADER = "X-Coordinator-Epoch"
+# Paths a standby (or a settling leader) still answers.
+ALWAYS_OPEN = ("/health", "/livez", "/ready", "/internal/leader", "/docs", "/openapi.json")
 
 
 class RegisterBody(BaseModel):
@@ -32,10 +50,33 @@ class RegisterBody(BaseModel):
     shard: int
     role: Literal["primary", "replica"]
     url: str
+    position: dict[str, Any] | None = None  # the node's operation-log position (for takeovers)
 
 
 class HeartbeatBody(BaseModel):
     node_id: str
+
+
+def _env_float(name: str, default: float) -> float:
+    return float(os.environ.get(name, default))
+
+
+def _elector_from_env() -> LeaderElector | None:
+    mode = os.environ.get("LEADER_ELECTION", "off")
+    if mode == "off":
+        return None
+    if mode != "kubernetes":
+        raise ValueError(f"LEADER_ELECTION must be off or kubernetes, got {mode!r}")
+    pod = os.environ.get("POD_NAME") or socket.gethostname()
+    return LeaderElector(
+        KubernetesLeaseBackend(os.environ.get("LEASE_NAME", "coordinator-leader"), pod_name=pod),
+        # Pod name + a per-process suffix: a container that crashed and restarted in
+        # the same pod is a NEW candidate, so if it wins again it gets a new epoch.
+        identity=f"{pod}_{uuid.uuid4().hex[:6]}",
+        lease_duration_s=_env_float("LEASE_DURATION_S", 6.0),
+        renew_deadline_s=_env_float("RENEW_DEADLINE_S", 4.0),
+        retry_period_s=_env_float("RETRY_PERIOD_S", 1.0),
+    )
 
 
 def create_app(
@@ -45,13 +86,19 @@ def create_app(
     node_transport: httpx.AsyncBaseTransport | None = None,
     node_timeout: float = 2.0,
     recovery_mode: str | None = None,
+    elector: LeaderElector | None | Literal["env"] = "env",
+    settle_timeout: float | None = None,
 ) -> FastAPI:
     """`node_transport` lets tests route node calls to in-process apps.
     `recovery_mode`: "auto" (catch up from the operation log when possible) or
-    "full" (always compare everything; for benchmarks). Default: $RECOVERY_MODE or auto."""
+    "full" (always compare everything; for benchmarks). Default: $RECOVERY_MODE or auto.
+    `elector`: "env" builds it from LEADER_ELECTION (off by default); tests pass
+    one on a shared in-memory lease, or None for a single coordinator."""
     recovery_mode = recovery_mode or os.environ.get("RECOVERY_MODE", "auto")
     if recovery_mode not in ("auto", "full"):
         raise ValueError(f"RECOVERY_MODE must be auto or full, got {recovery_mode!r}")
+    if elector == "env":
+        elector = _elector_from_env()
     registry = Registry(
         num_shards if num_shards is not None else config.NUM_SHARDS,
         heartbeat_timeout if heartbeat_timeout is not None else config.HEARTBEAT_TIMEOUT_S,
@@ -59,11 +106,57 @@ def create_app(
     holder: dict[str, Router] = {}
     recoveries: set[asyncio.Task] = set()
 
+    def router() -> Router:
+        return holder["router"]
+
+    async def admit(reg: dict[str, Any]) -> str:
+        """Put a registered node into the registry; start its catch-up if needed."""
+        node = registry.register(reg["node_id"], reg["shard"], reg["role"], reg["url"])
+        if node.state == RECOVERING:
+            # Catch up in the background; the node is told it's RECOVERING
+            # and keeps heartbeating meanwhile.
+            task = asyncio.create_task(
+                recover(registry, router().http, node.node_id, node.generation, app.state.recovery_mode)
+            )
+            recoveries.add(task)  # keep a reference so the task isn't garbage-collected
+            task.add_done_callback(recoveries.discard)
+        return node.state
+
+    def cancel_recoveries() -> None:
+        for task in list(recoveries):
+            task.cancel()
+
+    leadership = Leadership(
+        registry,
+        elector,
+        settle_timeout if settle_timeout is not None else 2 * config.HEARTBEAT_INTERVAL_S + 1,
+        admit,
+        cancel_recoveries,
+    )
+
     async def sweeper() -> None:
         # Active failure detection: check heartbeat ages every second.
         while True:
             registry.sweep()
             await asyncio.sleep(sweep_interval)
+
+    # Every call to a storage node carries our epoch, and a "fenced" answer means
+    # a newer leader exists: step down at once, whatever the call was.
+    async def add_epoch(request: httpx.Request) -> None:
+        if leadership.epoch is not None:
+            request.headers[EPOCH_HEADER] = str(leadership.epoch)
+
+    async def check_fenced(response: httpx.Response) -> None:
+        if response.status_code != 409 or not leadership.enabled:
+            return
+        await response.aread()
+        try:
+            detail = response.json().get("detail")
+        except ValueError:
+            return
+        if isinstance(detail, dict) and detail.get("error") == "fenced":
+            await leadership.fenced(detail)
+            raise Fenced(f"{response.request.url.host} refused epoch {leadership.epoch}: {detail}")
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -71,21 +164,37 @@ def create_app(
         # connect limit lets us fail over to the partner quickly when a node is
         # dead. Waiting for an ANSWER keeps the longer limit (a busy node is slow).
         timeout = httpx.Timeout(node_timeout, connect=min(node_timeout, 0.5))
-        async with httpx.AsyncClient(timeout=timeout, transport=node_transport) as http:
+        hooks = {"request": [add_epoch], "response": [check_fenced]}
+        async with httpx.AsyncClient(timeout=timeout, transport=node_transport, event_hooks=hooks) as http:
             holder["router"] = Router(registry, http)
-            task = asyncio.create_task(sweeper())
+            tasks = [asyncio.create_task(sweeper())]
+            if elector is not None:
+                tasks.append(asyncio.create_task(elector.run()))
+                tasks.append(asyncio.create_task(leadership.label_keeper()))
             yield
-            for t in [task, *recoveries]:
+            if elector is not None:
+                await elector.release()  # a clean shutdown hands over at once
+                await leadership.sync_label()  # and stop attracting traffic
+            for t in [*tasks, *recoveries]:
                 t.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.gather(task, *recoveries, return_exceptions=True)
+                await asyncio.gather(*tasks, *recoveries, return_exceptions=True)
 
     app = FastAPI(title="Coordinator", lifespan=lifespan)
     app.state.registry = registry
+    app.state.leadership = leadership
     app.state.recovery_mode = recovery_mode  # read at each registration, so a benchmark can switch it
 
-    def router() -> Router:
-        return holder["router"]
+    @app.middleware("http")
+    async def leader_gate(request: Request, call_next):
+        path = request.url.path
+        if not leadership.enabled or path in ALWAYS_OPEN:
+            return await call_next(request)
+        if not leadership.is_leader():
+            return JSONResponse({"detail": "standby coordinator: not the leader"}, status_code=503)
+        if leadership.settling and path.startswith("/store"):
+            return JSONResponse({"detail": "new leader is settling, retry shortly"}, status_code=503)
+        return await call_next(request)
 
     # Translate router errors into HTTP answers, in one place.
     @app.exception_handler(NodeAnswer)
@@ -99,6 +208,10 @@ def create_app(
     @app.exception_handler(AmbiguousWrite)
     async def _ambiguous(_: Request, exc: AmbiguousWrite):
         return JSONResponse({"detail": str(exc)}, status_code=503)
+
+    @app.exception_handler(Fenced)
+    async def _fenced(_: Request, exc: Fenced):
+        return JSONResponse({"detail": f"no longer the leader: {exc}"}, status_code=503)
 
     # -- client API (section 8) ---------------------------------------------------------
 
@@ -126,25 +239,39 @@ def create_app(
 
     @app.post("/internal/nodes/register")
     async def register(body: RegisterBody) -> dict[str, Any]:
+        reg = body.model_dump()
         try:
-            node = registry.register(body.node_id, body.shard, body.role, body.url)
+            if leadership.offer(reg):  # a new leader collects first, admits later
+                return {"ok": True, "state": "SETTLING", "epoch": leadership.epoch}
+            state = await admit(reg)
         except RegistrationError as exc:
             raise HTTPException(exc.status_code, detail=str(exc))
-        if node.state == RECOVERING:
-            # Catch up in the background; the node is told it's RECOVERING
-            # and keeps heartbeating meanwhile.
-            task = asyncio.create_task(
-                recover(registry, router().http, node.node_id, node.generation, app.state.recovery_mode)
-            )
-            recoveries.add(task)  # keep a reference so the task isn't garbage-collected
-            task.add_done_callback(recoveries.discard)
-        return {"ok": True, "state": node.state}
+        return {"ok": True, "state": state, "epoch": leadership.epoch}
 
     @app.post("/internal/nodes/heartbeat")
     def heartbeat(body: HeartbeatBody) -> dict[str, Any]:
-        if not registry.heartbeat(body.node_id):
+        if not (leadership.is_pending(body.node_id) or registry.heartbeat(body.node_id)):
             raise HTTPException(404, detail=f"{body.node_id} unknown or DOWN: register again")
-        return {"ok": True}
+        return {"ok": True, "epoch": leadership.epoch}
+
+    # -- leadership ------------------------------------------------------------------------
+
+    @app.get("/ready")
+    def ready() -> Response:
+        """200 only on the leader (for people and scripts). Not the readiness
+        probe: that is /livez, so rolling updates work; routing to the leader is
+        done with a pod label (election.py)."""
+        if leadership.is_leader():
+            return JSONResponse({"ready": True, **leadership.describe()})
+        return JSONResponse({"ready": False, **leadership.describe()}, status_code=503)
+
+    @app.get("/livez")
+    def livez() -> dict[str, str]:
+        return {"status": "alive"}
+
+    @app.get("/internal/leader")
+    def leader_info() -> dict[str, Any]:
+        return leadership.describe()
 
     # -- observability --------------------------------------------------------------------
 
@@ -181,6 +308,7 @@ def create_app(
         }
         return {
             "mode": "real",
+            "coordinator": leadership.describe(),
             "nodes": nodes,
             "shards": shards,
             "keys_per_shard": keys_per_shard,

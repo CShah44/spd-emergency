@@ -1,11 +1,57 @@
-# [A] The coordinator: Deployment + Service.
+# [A] The coordinator: two replicas, one leader (roadmap task 3).
 #
-# Exactly ONE replica, on purpose. The coordinator keeps the node registry
-# (who is UP, who leads each shard) in memory. Two copies behind one Service
-# would each see only half the heartbeats and disagree about leaders: split
-# brain. If the pod dies, Kubernetes starts a new one and every storage node
-# registers again within one heartbeat (3 s), rebuilding the registry.
-# (The app services, Person B's, are stateless and DO run 2+ replicas.)
+# Both pods run all the time. They elect a leader through a Kubernetes Lease
+# named "coordinator-leader" (services/coordinator/app/election.py):
+#   * the leader labels its own pod coordinator-role=leader, and the Service
+#     selects that label, so every request (clients AND storage-node
+#     heartbeats) goes to the leader. (Not via readiness: a pod that is never
+#     ready would block rolling updates. Both pods are ready; a standby that
+#     gets a request anyway answers 503.)
+#   * the standby keeps watching the lease and takes over when the leader stops
+#     renewing it (pod killed: about LEASE_DURATION_S) or releases it (pod
+#     deleted cleanly: about 1 s);
+#   * a new leader first collects every storage node's registration and puts the
+#     freshest node of each shard in charge, then serves (leadership.py);
+#   * fencing: each call to a storage node carries the leader's epoch, and nodes
+#     refuse an older one, so a frozen ex-leader can't change data.
+#
+#   kubectl -n emergency get lease coordinator-leader                    # who leads now
+#   kubectl -n emergency get pods -l app=coordinator -L coordinator-role # the leader's label
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: coordinator
+  namespace: emergency
+---
+# Just enough rights to run the election (the lease) and route to the winner
+# (the leader label on pods in this namespace).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: coordinator-leader-election
+  namespace: emergency
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: coordinator-leader-election
+  namespace: emergency
+subjects:
+  - kind: ServiceAccount
+    name: coordinator
+    namespace: emergency
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: coordinator-leader-election
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,28 +59,47 @@ metadata:
   namespace: emergency
   labels: {app: coordinator}
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
-    type: Recreate # never two coordinators at once, even during an update
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
   selector:
     matchLabels: {app: coordinator}
   template:
     metadata:
       labels: {app: coordinator}
     spec:
+      serviceAccountName: coordinator
+      terminationGracePeriodSeconds: 10 # time to release the lease on a clean stop
+      affinity:
+        podAntiAffinity: # on a real multi-node cluster, keep the two apart
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app: coordinator}
       containers:
         - name: coordinator
           image: coordinator:latest
           imagePullPolicy: IfNotPresent # use the image built locally by docker compose build
           envFrom:
             - configMapRef: {name: emergency-config}
+          env:
+            - {name: LEADER_ELECTION, value: kubernetes}
+            - {name: LEASE_NAME, value: coordinator-leader}
+            - {name: LEASE_DURATION_S, value: "6"}
+            - {name: RENEW_DEADLINE_S, value: "4"}
+            - {name: RETRY_PERIOD_S, value: "1"}
+            - name: POD_NAME # our name in the election
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
           ports:
             - containerPort: 8000
-          readinessProbe:
-            httpGet: {path: /health, port: 8000}
+          readinessProbe: # leader or standby: both count as ready (see the top)
+            httpGet: {path: /livez, port: 8000}
             periodSeconds: 5
-          livenessProbe:
-            httpGet: {path: /health, port: 8000}
+          livenessProbe: # alive, leader or not
+            httpGet: {path: /livez, port: 8000}
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
@@ -47,7 +112,7 @@ metadata:
   name: coordinator # -> DNS name "coordinator" inside the namespace
   namespace: emergency
 spec:
-  selector: {app: coordinator}
+  selector: {app: coordinator, coordinator-role: leader} # the leader's pod only
   ports:
     - port: 8000
       targetPort: 8000

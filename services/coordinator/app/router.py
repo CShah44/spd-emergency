@@ -52,6 +52,11 @@ class AmbiguousWrite(Exception):
     """The node may or may not have applied the write -> 503."""
 
 
+class Fenced(Exception):
+    """A storage node refused our leadership epoch: a newer coordinator leads -> 503.
+    Raised by the HTTP client's response hook (main.py), whatever the call was."""
+
+
 class NodeAnswer(Exception):
     """A normal 4xx answer from a node (404, 409, 400), passed through to the client."""
 

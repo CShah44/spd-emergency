@@ -286,6 +286,25 @@ class Store:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM kv WHERE deleted = 0").fetchone()[0]
 
+    # -- fencing (coordinator epochs) ----------------------------------------------------
+
+    def check_epoch(self, epoch: int) -> int | None:
+        """Fencing: remember the highest coordinator epoch seen (on disk, so a
+        restart doesn't forget it). Returns None if `epoch` is current or newer,
+        else the newer epoch we already know (the caller must be refused)."""
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM meta WHERE name = 'fence_epoch'").fetchone()
+            known = int(row[0]) if row else -1
+            if epoch < known:
+                return known
+            if epoch > known:
+                self._conn.execute(
+                    "INSERT INTO meta (name, value) VALUES ('fence_epoch', ?) "
+                    "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                    (str(epoch),),
+                )
+            return None
+
     # -- operation log -----------------------------------------------------------------
 
     def position(self) -> dict[str, Any]:

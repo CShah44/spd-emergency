@@ -217,6 +217,19 @@ Rules: versions keep counting past a tombstone (deleted v3 → recreated v4). Re
 - A `DOWN` node's heartbeats get 404, so it must register again, which means it always catches up before serving again.
 - **Leadership is sticky:** the leader keeps the shard while it is `UP`. After a failover the replica keeps leading even when the old primary is back. Leadership moves only when the leader fails, so two nodes never accept compare-and-set writes for the same shard at once.
 
+### 8.3 Two coordinators: leader election and fencing
+
+With `LEADER_ELECTION=kubernetes` (the Kubernetes manifests) two coordinator pods run; with `off` (Docker Compose, the default) there is one, as before.
+
+- **Election:** the pods compete for a Kubernetes Lease (`coordinator-leader`). The leader renews it every second; if it can't for `RENEW_DEADLINE_S` (4 s) it stops acting as leader, before the lease (`LEASE_DURATION_S`, 6 s) runs out. A standby takes over when it has seen no renewal for a full lease duration, or at once if the leader released it on a clean shutdown. Expiry is judged by the standby's own clock, so the pods' clocks needn't agree.
+- **Routing:** the leader labels its pod `coordinator-role=leader` and the Service selects that label. Both pods pass the readiness probe, so rolling updates work. A standby answers 503 to anything but `/health`, `/livez`, `/ready` (200 on the leader only) and `/internal/leader`.
+- **Settling after a takeover:** the registry is in memory, so a new leader starts empty. Nodes get 404 on their next heartbeat and register again, sending their operation-log position. For up to `2 × HEARTBEAT_INTERVAL_S + 1` s (or until all six are back) the leader only collects registrations and answers `/store` with 503. Then, per shard, it admits the **freshest** node first (it leads) and the other second (it catches up). Node X is at least as fresh as Y when X's watermark for Y's log reaches Y's head; if both or neither are, the configured primary leads.
+- **Fencing:** the epoch is the Lease's `leaseTransitions`, +1 at every handover. Every coordinator → node call carries `X-Coordinator-Epoch`; nodes also adopt the epoch from the register and heartbeat answers. A node stores the highest epoch it has seen (on disk) and answers `409 {"error": "fenced"}` to an older one. A coordinator that gets that answer steps down at once. So a leader that froze, lost the lease, and woke up can't change data.
+- `/internal/status` → `coordinator`: who leads, the epoch, whether it is settling, and the last takeover (how long settling took and which node leads each shard).
+- Each process competes as `<pod>_<random suffix>`, so a container that crashed and restarted in the same pod is a new candidate and, if it wins, gets a new epoch.
+- **Measured** (docs/COORDINATOR_FAILOVER.md, `scripts/measure_coordinator_failover.py`): 0 acknowledged writes lost; client-visible outage 3.2 s (pod deleted), 9.1 s (crash), 12.2 s (frozen 10 s).
+- **Limit:** `kubectl port-forward svc/coordinator` (used by `scripts/k8s_forward.py`) attaches to one pod. If leadership moves while that pod stays alive, `localhost:8000` reaches the standby (503) until the forward restarts. Traffic inside the cluster always follows the Service.
+
 ---
 
 ## 9. Recommended file structure

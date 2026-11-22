@@ -239,6 +239,14 @@ The integration tests skip themselves when no stack is reachable.
   same version.
 - **A returning node catches up before serving.** It registers as `RECOVERING`, receives
   new writes, syncs with its partner, and only then becomes `UP`.
+- **Two coordinators on Kubernetes, one leader, with fencing.** They elect a leader through a
+  Kubernetes Lease and the Service routes to the leader's pod. If the leader dies, the
+  standby takes over, waits for the storage nodes to check in, and puts the freshest node of
+  each shard in charge before serving. Every call to a storage node carries the leader's
+  epoch, and nodes refuse an older one, so a leader that froze and woke up can't change data
+  (split brain). Details in DESIGN.md section 8.3. Measured on Kubernetes: 0 acknowledged
+  writes lost when the leader is deleted (3.2 s outage), crashes (9.1 s) or freezes (12.2 s);
+  see docs/COORDINATOR_FAILOVER.md.
 - **Catch-up reads an operation log, not the whole data set.** Each node numbers its own
   writes, and each node remembers how far it has received its partner's. A returning node
   fetches only the writes after that point, so catching up depends on how long it was gone,

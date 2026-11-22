@@ -44,6 +44,8 @@ from .heartbeat import heartbeat_loop
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
+EPOCH_HEADER = "X-Coordinator-Epoch"
+
 
 @dataclass(frozen=True)
 class NodeSettings:
@@ -103,6 +105,22 @@ class NodeState:
     def identity(self) -> dict[str, Any]:
         s = self.settings
         return {"node_id": s.node_id, "shard": s.shard_id, "role": s.role, "url": s.node_url}
+
+    def registration(self) -> dict[str, Any]:
+        """What we send when registering: who we are, plus how up to date our data
+        is (operation log position), so a new coordinator leader can tell which
+        node of a shard is freshest."""
+        body = self.identity()
+        if self.store is not None:
+            body["position"] = self.store.position()
+        return body
+
+    def learn_epoch(self, answer: dict[str, Any]) -> None:
+        """The coordinator's answer to register/heartbeat carries its epoch: adopt
+        it at once, so an older leader is refused from this moment on."""
+        epoch = answer.get("epoch") if isinstance(answer, dict) else None
+        if isinstance(epoch, int) and self.store is not None:
+            self.store.check_epoch(epoch)
 
 
 class Origin(BaseModel):
@@ -174,10 +192,29 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
         return state.store
 
     @app.middleware("http")
+    async def fence_gate(request: Request, call_next):
+        # Fencing (roadmap task 3): a coordinator sends its leadership epoch with
+        # every call. One with an OLDER epoch than we have seen is a former leader
+        # that doesn't know it was replaced (e.g. it froze): refuse it, so two
+        # coordinators can never both change our data. No header = no election
+        # (Docker Compose, tests): accepted.
+        raw = request.headers.get(EPOCH_HEADER)
+        if raw is not None and request.url.path.startswith("/internal/"):
+            if not raw.isdigit():
+                return JSONResponse({"detail": f"bad {EPOCH_HEADER}: {raw!r}"}, status_code=400)
+            known = store().check_epoch(int(raw))
+            if known is not None:
+                return JSONResponse(
+                    {"detail": {"error": "fenced", "epoch": known, "yours": int(raw)}}, status_code=409
+                )
+        return await call_next(request)
+
+    @app.middleware("http")
     async def pause_gate(request: Request, call_next):
         # A paused node behaves like a dead one: no answers, no heartbeats.
         # /admin stays open so we can resume it, and /livez so Kubernetes
         # doesn't restart a paused pod in the middle of a demo.
+        # (Added last, so it runs first: a paused node doesn't even look at epochs.)
         if state.paused and not request.url.path.startswith(("/admin", "/livez")):
             return JSONResponse({"detail": f"{settings.node_id} is paused"}, status_code=503)
         return await call_next(request)
