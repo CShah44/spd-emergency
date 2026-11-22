@@ -1,0 +1,50 @@
+# [B] The Delta Command web page: Deployment + Service.
+#
+# ONE replica on purpose: the page keeps each open browser tab's state in this pod's
+# memory, so a second replica behind a plain Service would lose a tab's state whenever
+# its connection hopped to the other pod. It stores nothing, and Kubernetes replaces it
+# if it dies.
+#   kubectl port-forward -n emergency svc/ui-service 8081:8000   (or: scripts/k8s_forward.py)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui-service
+  namespace: emergency
+  labels: {app: ui-service}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: ui-service}
+  template:
+    metadata:
+      labels: {app: ui-service}
+    spec:
+      containers:
+        - name: ui-service
+          image: ui-service:latest
+          imagePullPolicy: IfNotPresent # use the image built locally by docker compose build
+          env:
+            - {name: API_URL, value: "http://request-service:8000"}
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 384Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui-service
+  namespace: emergency
+spec:
+  selector: {app: ui-service}
+  ports:
+    - port: 8000
+      targetPort: 8000
