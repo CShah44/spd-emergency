@@ -12,7 +12,8 @@ python loadtest/run.py --rate 10 --duration 60 --label steady --record   # also 
 ```
 
 `run.py` registers enough responders, runs the load, waits for every accepted request to be
-answered and checks each one (`verify.py`), then reads the latency from Prometheus
+answered (as long as answers keep arriving: a deep queue that is still draining is slow, not
+lost) and checks each one (`verify.py`), then reads the latency from Prometheus
 (`spd_match_e2e_seconds`, measured inside the matcher, not by polling from the client).
 Start from a clean stack: leftovers from earlier runs are matched by the sweeper and look
 like very slow requests, so `run.py` refuses to start if any are PENDING (`--allow-dirty` overrides).

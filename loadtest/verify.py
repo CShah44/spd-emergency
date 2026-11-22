@@ -1,10 +1,16 @@
 """After a load run: did every accepted request get an answer, and was any responder given twice?
 
-    python loadtest/verify.py loadtest/results/steady-ids.txt          # waits up to 60 s for answers
-    python loadtest/verify.py ids.txt --wait 120 --api http://localhost:8080
+    python loadtest/verify.py loadtest/results/steady-ids.txt          # waits while answers keep arriving
+    python loadtest/verify.py ids.txt --wait 300 --stall 60 --api http://localhost:8080
+
+It waits for as long as answers keep arriving: a deep queue that is still draining is slow,
+not lost. A request counts as lost only once NOTHING has been answered for --stall seconds
+(longer than the sweeper needs to rescue a request that was saved but never queued), or
+--wait seconds have passed in all. The responder checks run after that, on a quiet system,
+because while matching is still going on a claim and its request are legitimately out of step.
 
 "Lost requests" are ids that end up in none of the acceptable states:
-  * still PENDING after the wait (accepted, but nothing ever matched it)
+  * still PENDING when the waiting is over (accepted, but nothing ever matched it)
   * not found (the API said 201 but the record is gone)
   * unreadable (the API kept failing for it)
 MATCHED and UNMATCHED are both fine: UNMATCHED means nobody was in range, which is an
@@ -94,18 +100,27 @@ def classify(ids: list[str], requests: dict[str, dict | str], resources: list[di
 
 def fetch_answers(
     ids: list[str], get: Callable[[str], dict | str], wait_s: float, interval_s: float = 1.0, workers: int = 16,
+    stall_s: float | None = None,
 ) -> dict[str, dict | str]:
-    """Ask for every id, and keep asking for the ones not answered yet until `wait_s` runs out."""
+    """Ask for every id, and keep asking for the ones not answered yet. Stops when everything is
+    answered, when `wait_s` has passed in all, or when no new answer has arrived for `stall_s`
+    (default: same as wait_s, i.e. only the total limit applies)."""
     results: dict[str, dict | str] = {}
     todo = list(ids)
-    deadline = time.monotonic() + wait_s
+    started = time.monotonic()
+    deadline = started + wait_s
+    stall_s = wait_s if stall_s is None else stall_s
+    last_progress, answered = started, -1
     with ThreadPoolExecutor(max_workers=workers) as pool:
         while todo:
             for request_id, record in zip(todo, pool.map(get, todo)):
                 results[request_id] = record
             todo = [i for i in todo if not (isinstance(results[i], dict) and results[i]["status"] in ANSWERED)
                     and results[i] != "missing"]
-            if not todo or time.monotonic() >= deadline:
+            now = time.monotonic()
+            if len(ids) - len(todo) > answered:
+                answered, last_progress = len(ids) - len(todo), now
+            if not todo or now >= deadline or now - last_progress >= stall_s:
                 break
             time.sleep(interval_s)
     return results
@@ -123,9 +138,14 @@ def http_getter(client: httpx.Client) -> Callable[[str], dict | str]:
     return get
 
 
-def verify(api: str, ids: list[str], wait_s: float) -> Report:
+def verify(api: str, ids: list[str], wait_s: float, stall_s: float = 150.0) -> Report:
     with httpx.Client(base_url=api, timeout=15.0, limits=httpx.Limits(max_connections=32)) as client:
-        answers = fetch_answers(ids, http_getter(client), wait_s)
+        get = http_getter(client)
+        answers = fetch_answers(ids, get, wait_s, stall_s=stall_s)
+        # The final look, once nothing is moving any more: re-read whatever was still unanswered
+        # (it may have been answered between the last poll and now), then the responders.
+        for request_id in [i for i in ids if not (isinstance(answers[i], dict) and answers[i]["status"] in ANSWERED)]:
+            answers[request_id] = get(request_id)
         resources = client.get("/resources").json()
     return classify(ids, answers, resources)
 
@@ -151,11 +171,12 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("ids_file", help="the ids the load run saved, one per line")
     p.add_argument("--api", default="http://localhost:8080")
-    p.add_argument("--wait", type=float, default=60.0, help="seconds to wait for answers (default 60)")
+    p.add_argument("--wait", type=float, default=900.0, help="most seconds to wait for answers in all (default 900)")
+    p.add_argument("--stall", type=float, default=150.0, help="give up when no answer has arrived for this long (default 150)")
     p.add_argument("--json", action="store_true", help="print the report as JSON")
     args = p.parse_args()
     ids = [line.strip() for line in open(args.ids_file) if line.strip()]
-    report = verify(args.api, ids, args.wait)
+    report = verify(args.api, ids, args.wait, args.stall)
     print(json.dumps({**asdict(report), "lost": report.lost, "ok": report.ok}, indent=2) if args.json else summary(report))
     return 0 if report.ok else 1
 

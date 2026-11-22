@@ -1,7 +1,8 @@
 """Run one load scenario end to end and print its result row.
 
     python loadtest/run.py --rate 20 --duration 60                 # steady load, nothing broken
-    python loadtest/run.py --rate 20 --duration 60 --record steady # also add the row to loadtest/RESULTS.md
+    python loadtest/run.py --rate 10 --duration 60 --scenario kill-matcher --record
+                                                                   # break something 10 s into the load (see scripts/chaos.py)
 
 What it does:
   1. checks the stack is up and clean (no old PENDING requests: the sweeper would match
@@ -26,6 +27,7 @@ import os
 import random
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -34,6 +36,8 @@ from pathlib import Path
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import chaos  # noqa: E402
 from loadtest import verify  # noqa: E402
 from loadtest.common import CITIES, TYPES, random_point  # noqa: E402
 
@@ -43,8 +47,8 @@ RESULTS_MD = ROOT / "loadtest" / "RESULTS.md"
 PER_USER_RATE = 5  # requests per second each simulated user sends (see locustfile.py)
 SCRAPE_WAIT_S = 8  # Prometheus scrapes every 5 s: wait for the last numbers to arrive
 TABLE_HEADER = (
-    "| scenario | rate (req/s) | duration | sent | matched | unmatched | p50 | p95 | p99 | lost | double-assigned | recovery | date |\n"
-    "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    "| scenario | rate (req/s) | duration | accepted | refused | matched | unmatched | p50 | p95 | p99 | lost | double-assigned | recovery | date |\n"
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
 )
 
 
@@ -131,15 +135,20 @@ def match_latency(prometheus: str, window_s: int) -> dict:
     return out
 
 
+LATENCY_TOP_BUCKET_S = 120  # the biggest bucket of spd_match_e2e_seconds: anything slower is only known to be slower
+
+
 def seconds(value: float | None) -> str:
     if value is None:
         return "n/a"
+    if value >= LATENCY_TOP_BUCKET_S:
+        return f">{LATENCY_TOP_BUCKET_S} s"
     return f"{value * 1000:.0f} ms" if value < 1 else f"{value:.2f} s"
 
 
-def result_row(label: str, rate: float, duration: int, accepted: int, report: verify.Report, latency: dict,
-               recovery: str = "-") -> str:
-    cells = [label, f"{rate:g}", f"{duration} s", str(accepted), str(report.matched),
+def result_row(label: str, rate: float, duration: int, accepted: int, refused: int, report: verify.Report,
+               latency: dict, recovery: str = "-") -> str:
+    cells = [label, f"{rate:g}", f"{duration} s", str(accepted), str(refused), str(report.matched),
              str(report.unmatched), seconds(latency["p50"]), seconds(latency["p95"]), seconds(latency["p99"]),
              str(report.lost), str(len(report.double_assigned) + len(report.inconsistent) + len(report.leaked)),
              recovery, datetime.now(timezone.utc).strftime("%Y-%m-%d")]
@@ -161,13 +170,18 @@ def main() -> int:
     p.add_argument("--duration", type=int, default=30, help="seconds of load (default 30)")
     p.add_argument("--responders", type=int, help="responders to register (default: 1.5 per request, so all can match)")
     p.add_argument("--skip-seed", action="store_true", help="don't register responders (use what is there)")
-    p.add_argument("--drain", type=float, default=60, help="seconds to wait for answers after the load stops")
+    p.add_argument("--scenario", choices=list(chaos.SCENARIOS), help="break something during the load (scripts/chaos.py)")
+    p.add_argument("--chaos-at", type=float, default=10, help="seconds into the load when the scenario starts (default 10)")
+    p.add_argument("--drain", type=float, default=900, help="most seconds to wait for answers after the load stops (default 900)")
+    p.add_argument("--stall", type=float, default=150, help="give up on the unanswered ones when no answer has arrived for this "
+                   "long (default 150: longer than the sweeper needs to rescue requests that were saved but never queued)")
     p.add_argument("--api", default=os.environ.get("API_URL", "http://localhost:8080"))
     p.add_argument("--prometheus", default=os.environ.get("PROMETHEUS_URL", "http://localhost:9090"))
-    p.add_argument("--label", default="steady", help="name of the scenario in the result row")
+    p.add_argument("--label", help="name of the scenario in the result row (default: the scenario, or 'steady')")
     p.add_argument("--record", action="store_true", help="append the row to loadtest/RESULTS.md")
     p.add_argument("--allow-dirty", action="store_true", help="run even if old PENDING requests exist")
     args = p.parse_args()
+    args.label = args.label or args.scenario or "steady"
 
     try:
         preflight(args.api, args.prometheus, args.allow_dirty)
@@ -183,11 +197,20 @@ def main() -> int:
 
         print(f">> sending {args.rate:g} requests/s for {args.duration} s", flush=True)
         started = time.time()
+        chaos_result: dict = {}
+        chaos_thread = None
+        if args.scenario:
+            def break_something() -> None:
+                chaos_result["outcome"] = chaos.run(args.scenario, chaos.detect_platform())
+            chaos_thread = threading.Timer(args.chaos_at, break_something)
+            chaos_thread.start()
         post = run_locust(args.api, args.rate, args.duration, ids_file, prefix)
+        if chaos_thread:
+            chaos_thread.join(timeout=300)
         ids = [line.strip() for line in open(ids_file) if line.strip()] if ids_file.exists() else []
         print(f">> load finished: {post['sent']} sent, {post['refused']} refused; checking every accepted request", flush=True)
 
-        report = verify.verify(args.api, ids, args.drain)
+        report = verify.verify(args.api, ids, args.drain, args.stall)
         time.sleep(SCRAPE_WAIT_S)
         latency = match_latency(args.prometheus, int(time.time() - started) + 5)
     except Abort as exc:
@@ -198,7 +221,12 @@ def main() -> int:
     print(f"\nmatcher answers counted by Prometheus: about {latency['observed']:.0f} (an estimate: Prometheus extrapolates at the window edges)"
           if latency["observed"] is not None else "\nmatcher count: n/a")
     print(f"POST /requests as the clients saw it: p95 {post['post_p95_ms']} ms, {post['refused']} refused")
-    row = result_row(args.label, args.rate, args.duration, len(ids), report, latency)
+    recovery = "-"
+    if "outcome" in chaos_result:
+        after = chaos_result["outcome"].recovered_after_s
+        recovery = f"{after:g} s" if after is not None else "did not recover"
+        print(f"chaos: {chaos_result['outcome'].scenario} broke {chaos_result['outcome'].what}; recovery {recovery}")
+    row = result_row(args.label, args.rate, args.duration, len(ids), post["refused"], report, latency, recovery)
     print("\n" + TABLE_HEADER + row)
     json.dump({"row": row, "post": post, "latency": latency, "lost": report.lost, "ok": report.ok},
               open(f"{prefix}.json", "w"), indent=2)
