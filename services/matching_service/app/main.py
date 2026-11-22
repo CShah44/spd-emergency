@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from common import metrics
 from common.storage_client import NotFound, StorageClient, StorageError, StorageUnavailable, VersionConflict
 
 from .consumer import Consumer
@@ -57,6 +58,8 @@ def create_app(store: StorageClient | None = None, consume: bool = True) -> Fast
         description="Pairs each emergency request with the nearest free resource of the right type.",
         lifespan=lifespan,
     )
+
+    metrics.instrument(app, "matching-service")
 
     # Storage errors become HTTP answers in one place.
     def _error(status_code: int):

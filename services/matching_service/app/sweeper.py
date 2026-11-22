@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from common import config
+from common import config, metrics
 from common.models import RequestStatus
 from common.sharding import REQUEST_PREFIX
 from common.storage_client import StorageClient, StorageError, StorageUnavailable, VersionConflict
@@ -68,6 +68,7 @@ class Sweeper:
                 log.exception("%s: sweep failed", request["id"])
             else:
                 log.info("%s was never queued: swept, %s", request["id"], result.outcome)
+                metrics.SWEEPER_RESCUED.inc()
                 handled += 1
         return handled
 
