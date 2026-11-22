@@ -130,9 +130,9 @@ def test_durations_are_shown_in_a_readable_unit():
 def test_the_row_has_one_cell_per_column():
     report = verify.classify(["r1"], {"r1": req("r1", "MATCHED", "x1")}, [res("x1", holder="r1")])
 
-    row = result_row("steady", 20, 30, 1, report, {"p50": 0.07, "p95": 0.1, "p99": 0.2, "observed": 1})
+    row = result_row("steady", 20, 30, 1, 0, report, {"p50": 0.07, "p95": 0.1, "p99": 0.2, "observed": 1})
 
-    assert row.count("|") == 14 and "| steady | 20 | 30 s | 1 | 1 | 0 | 70 ms | 100 ms | 200 ms | 0 | 0 |" in row
+    assert row.count("|") == 15 and "| steady | 20 | 30 s | 1 | 0 | 1 | 0 | 70 ms | 100 ms | 200 ms | 0 | 0 |" in row
 
 
 def test_latency_is_n_a_when_prometheus_is_unreachable():
