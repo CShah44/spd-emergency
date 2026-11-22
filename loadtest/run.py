@@ -58,17 +58,26 @@ class Abort(Exception):
 
 # -- before ---------------------------------------------------------------------------------------
 
+def dirty_reason(summary: dict, responders: int) -> str | None:
+    """Why the stack is not clean, or None. Leftovers from earlier runs slow every match down (each
+    storage node scans every responder it holds) and old PENDING requests are swept during the run
+    with their age counted as latency, so a run on a used stack measures the leftovers, not the system."""
+    if summary["total"] or responders:
+        return (f"the stack already holds {summary['total']} requests ({summary['PENDING']} still PENDING) and "
+                f"{responders} responders from earlier runs, which would distort the numbers")
+    return None
+
+
 def preflight(api: str, prometheus: str, allow_dirty: bool) -> None:
     try:
         summary = httpx.get(f"{api}/requests/summary", timeout=5).json()
+        responders = len(httpx.get(f"{api}/resources", timeout=30).json())
     except httpx.HTTPError as exc:
         raise Abort(f"the API at {api} is not answering ({exc!r}). Is the stack running?") from exc
-    if summary["PENDING"] and not allow_dirty:
-        raise Abort(
-            f"{summary['PENDING']} requests from an earlier run are still PENDING. The sweeper would match them "
-            "during this run and their age would distort the latency. Start from a clean stack "
-            "(scripts/k8s_up.py --fresh, or docker compose down -v), or pass --allow-dirty."
-        )
+    reason = dirty_reason(summary, responders)
+    if reason and not allow_dirty:
+        raise Abort(f"{reason}. Start from a clean stack (--fresh, or scripts/k8s_up.py --fresh, or "
+                    "docker compose down -v), or pass --allow-dirty.")
     try:
         httpx.get(f"{prometheus}/-/ready", timeout=5).raise_for_status()
     except httpx.HTTPError as exc:
@@ -83,6 +92,18 @@ def seed_responders(api: str, count: int, rng: random.Random) -> None:
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         list(pool.map(register, range(count)))
+
+
+def fresh_stack(api: str) -> None:
+    """Wipe all data and restart the Kubernetes stack (scripts/k8s_up.py --fresh --skip-build): every
+    row of RESULTS.md starts from the same empty system. Images are reused, so run k8s_up.py once
+    without --skip-build after changing code."""
+    print(">> wiping the cluster and restarting the stack (k8s_up.py --fresh --skip-build)", flush=True)
+    done = subprocess.run([sys.executable, str(ROOT / "scripts" / "k8s_up.py"), "--fresh", "--skip-build"],
+                          cwd=ROOT, capture_output=True, text=True)
+    if done.returncode != 0:
+        raise Abort("could not restart the stack:\n" + (done.stdout + done.stderr)[-1500:])
+    time.sleep(15)  # let the matcher pods connect to RabbitMQ and Prometheus see them
 
 
 # -- the load ---------------------------------------------------------------------------------------------
@@ -180,11 +201,14 @@ def main() -> int:
     p.add_argument("--prometheus", default=os.environ.get("PROMETHEUS_URL", "http://localhost:9090"))
     p.add_argument("--label", help="name of the scenario in the result row (default: the scenario, or 'steady')")
     p.add_argument("--record", action="store_true", help="append the row to loadtest/RESULTS.md")
-    p.add_argument("--allow-dirty", action="store_true", help="run even if old PENDING requests exist")
+    p.add_argument("--allow-dirty", action="store_true", help="run even if the stack already holds records from earlier runs")
+    p.add_argument("--fresh", action="store_true", help="wipe the Kubernetes stack and restart it first (needs the images already built)")
     args = p.parse_args()
     args.label = args.label or args.scenario or "steady"
 
     try:
+        if args.fresh:
+            fresh_stack(args.api)
         preflight(args.api, args.prometheus, args.allow_dirty)
         rng = random.Random()
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

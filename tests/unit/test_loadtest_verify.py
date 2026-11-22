@@ -155,6 +155,20 @@ def test_durations_are_shown_in_a_readable_unit():
     assert seconds(0.0734) == "73 ms" and seconds(2.5) == "2.50 s" and seconds(None) == "n/a"
 
 
+def test_an_empty_stack_is_clean():
+    from loadtest.run import dirty_reason
+
+    assert dirty_reason({"total": 0, "PENDING": 0}, 0) is None
+
+
+def test_old_requests_or_responders_make_the_stack_dirty():
+    from loadtest.run import dirty_reason
+
+    assert "5 requests" in dirty_reason({"total": 5, "PENDING": 0}, 0)
+    assert "40 responders" in dirty_reason({"total": 0, "PENDING": 0}, 40)
+    assert "2 still PENDING" in dirty_reason({"total": 9, "PENDING": 2}, 0)
+
+
 def test_a_latency_in_the_top_bucket_is_shown_as_a_lower_bound():
     assert seconds(120.0) == ">120 s" and seconds(119.0) == "119.00 s"
 

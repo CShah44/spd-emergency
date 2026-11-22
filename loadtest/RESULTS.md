@@ -72,3 +72,39 @@ The "before" for this comparison is the `overload-keda` row above.
 - **Shards asked per query: 1.66 on average** over the whole run (`spd_shards_per_query`: 820 queries touched 1 shard, 1,548 touched 2, 12 touched all 3). That is down from 3, but not "mostly 1": a request and its neighbours often straddle two regions. This average also includes the verifier's and the web page's own queries.
 - **The hot spot is real.** Records per shard after the run: shard 0 held 587, shard 1 held 1,673 and shard 2 held 724 (each on two nodes), so one shard holds 56% of everything. The five cities hash to uneven regions; with hash sharding the three would have been about equal. That is the price of keeping nearby records together.
 - Only one run per side, on one laptop, so treat the size of the gain as indicative. The before and after were measured on separate fresh clusters.
+
+## Final (the finished system)
+
+All five upgrades are in: coordinator HA, the operation log, geo-sharding, KEDA (1 to 5 matchers) and the
+storage-side changes. Every row ran with `python loadtest/run.py --fresh`, on the same laptop and the same
+minikube setup as the baseline (4 CPUs, 4 GB), and started from a wiped cluster.
+
+| scenario | rate (req/s) | duration | accepted | refused | matched | unmatched | p50 | p95 | p99 | lost | double-assigned | recovery | date |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| steady | 5 | 60 s | 296 | 0 | 288 | 8 | 75 ms | 98 ms | 100 ms | 0 | 0 | - | 2026-11-22 |
+| steady | 10 | 60 s | 592 | 0 | 586 | 6 | 97 ms | 234 ms | 247 ms | 0 | 0 | - | 2026-11-22 |
+| overload | 20 | 60 s | 1184 | 0 | 1184 | 0 | 7.81 s | 23.73 s | 28.74 s | 0 | 0 | - | 2026-11-22 |
+| kill-matcher | 5 | 60 s | 296 | 0 | 284 | 12 | 75 ms | 98 ms | 126 ms | 0 | 0 | 1.8 s | 2026-11-22 |
+| kill-rabbitmq | 5 | 60 s | 254 | 0 | 252 | 2 | 81 ms | 85.36 s | 113.07 s | 0 | 0 | 21.7 s | 2026-11-22 |
+| kill-storage-leader | 5 | 60 s | 297 | 0 | 285 | 12 | 75 ms | 98 ms | 100 ms | 0 | 0 | 3.1 s | 2026-11-22 |
+| pause-storage-node | 5 | 60 s | 296 | 0 | 284 | 12 | 74 ms | 97 ms | 99 ms | 0 | 0 | 19.1 s | 2026-11-22 |
+| kill-coordinator-leader | 5 | 60 s | 269 | 3 | 264 | 5 | 75 ms | 97 ms | 99 ms | 0 | 0 | 2.8 s | 2026-11-22 |
+
+**Final against the baseline** (same scenarios; the final system runs KEDA, so the matcher count is not fixed at 2 as it was in the baseline):
+
+| scenario | baseline | final |
+|---|---|---|
+| steady 5 req/s, p99 | 353 ms | 100 ms |
+| steady 10 req/s, p99 | 4.82 s | 247 ms |
+| overload 20 req/s, median / p99 | 89 s / >120 s | 7.8 s / 28.7 s |
+| kill-matcher, recovery | 8.3 s | 1.8 s |
+| kill-rabbitmq, p95 / p99 | 85 s / 113 s | 85 s / 113 s |
+
+**Reading it:**
+- **Nothing lost, nothing double-assigned in any of the eight scenarios**, including crashing a storage leader, freezing a storage node and crashing the coordinator leader under load.
+- **The steady and overload gains are real but come from several changes together** (KEDA, fewer shards asked, the faster storage path). These rows cannot say how much each one contributed. A run with KEDA paused at 2 matchers, which would separate KEDA from the rest, was not done.
+- **Single runs vary.** The same configuration (KEDA and geo-sharding, 20 req/s overload) measured a median of 3.1 s in the geo section above and 7.8 s here. The 89 s to under 30 s change is far outside that spread, but the geo section's 10.4 s to 3.1 s should not be read as proof that geo-sharding alone made that difference: the repeat run (7.8 s) is within the noise of the KEDA-only run (10.4 s). What the geo change did measurably do is cut the shards asked per query from 3 to 1.66.
+- **kill-rabbitmq is unchanged by the upgrades**, as expected: requests saved while the broker was down still wait for the sweeper (60 s stale, checked every 30 s), so p95 and p99 are about a minute and a half to two minutes. Nothing was lost.
+- **kill-coordinator-leader refused 3 requests** (503 during the hand-over, 2.8 s to recover) and lost none: the client was told.
+- **Recovery times are approximate.** They are measured from the crash until the matchers are consuming again in the same number and the pods are Ready (matchers), or by each storage scenario's own check. The queue's consumer count comes from Prometheus at 5 s resolution and RabbitMQ takes a moment to notice a dead connection, so the 1.8 s for kill-matcher is the replacement pod becoming Ready and should not be read to the second. pause-storage-node's 19.1 s includes the 15 s the node was frozen.
+- Rows are single runs on one laptop.
