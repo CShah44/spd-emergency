@@ -10,6 +10,8 @@ A record's id carries its cell: 'res-<cell>-<hex>' and 'req-<cell>-<hex>', so wh
 before geo-sharding ('res-<16 hex>') have no cell: cell_of_id() answers None for them.
 """
 
+from math import cos, radians
+
 _BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"  # geohash's alphabet: no a, i, l or o
 _DECODE = {c: i for i, c in enumerate(_BASE32)}
 
@@ -83,6 +85,21 @@ def cells_around(lat: float, lon: float, precision: int = PRECISION) -> list[str
     50 km search radius there."""
     cell = encode(lat, lon, precision)
     return [cell] + neighbours(cell)
+
+
+def cells_cover(lat: float, lon: float, radius_km: float, precision: int = PRECISION) -> bool:
+    """Is everything within radius_km of this point certain to lie in cells_around()?
+
+    The point is somewhere inside its own cell, so the nearest edge of the 3 x 3 block is at least
+    one whole cell away: the radius is covered when a cell is at least that wide and tall. Cells get
+    narrower towards the poles (about 156 km wide at the equator, 50 km at 71 degrees of latitude),
+    so this is False up there and for a very large radius; the matcher then asks every shard."""
+    lat_min, lat_max, lon_min, lon_max = decode(encode(lat, lon, precision))
+    lat_step, lon_step = lat_max - lat_min, lon_max - lon_min
+    farthest_from_equator = min(90.0, max(abs(lat_min - lat_step), abs(lat_max + lat_step)))
+    km_per_degree = 111.195
+    narrowest_km = lon_step * km_per_degree * cos(radians(farthest_from_equator))
+    return min(lat_step * km_per_degree, narrowest_km) >= radius_km
 
 
 def cell_of_id(record_id: str) -> str | None:
