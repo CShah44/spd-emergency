@@ -118,6 +118,11 @@ def pod_of(node_id: str) -> str:
 
 
 def fail_node(node_id: str, method: str) -> None:
+    if method == "stop" and on_kubernetes():
+        # `docker compose stop` would find nothing to stop and the demo would carry on
+        # as if a node had failed. Say so instead.
+        raise SystemExit("--method stop only works on the Docker Compose stack. "
+                         "On Kubernetes use --method pause (or delete-pod).")
     if method == "stop":
         compose("stop", service_of(node_id))
     elif method == "pause":
