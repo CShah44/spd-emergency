@@ -8,10 +8,12 @@ Rules enforced here:
 """
 
 import logging
+import time
 from typing import Any
 
 from fastapi import HTTPException
 
+from common import metrics
 from common.models import (
     REQUEST_TRANSITIONS, RequestStatus, ResourceStatus, can_move_request, can_move_resource, new_request_id,
     new_resource_id, utc_now_iso,
@@ -52,9 +54,11 @@ class Service:
             "status": RequestStatus.PENDING,
             "assigned_resource_id": None,
             "created_at": now,
+            "created_ts": time.time(),  # created_at only has whole seconds; the matcher times itself against this
             "updated_at": now,
         }
         saved = self.store.put(request_key(record["id"]), record)
+        metrics.REQUESTS_CREATED.labels(type=saved["type"]).inc()
         self._enqueue(saved["id"])
         return saved
 
@@ -175,4 +179,5 @@ class Service:
         try:
             self.publisher.publish(request_id)
         except PublishError as exc:
+            metrics.PUBLISH_FAILURES.inc()
             log.error("%s is saved but NOT queued: %s", request_id, exc)

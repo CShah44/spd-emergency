@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from common import config
+from common import config, metrics
 from common.models import RequestStatus, ResourceStatus, Type
 from common.storage_client import NotFound, StorageClient, StorageError, StorageUnavailable, VersionConflict
 
@@ -64,6 +64,8 @@ def create_app(
         ),
         lifespan=lifespan,
     )
+
+    metrics.instrument(app, "request-service")
 
     # -- errors become HTTP answers in one place --------------------------------------------------
 
