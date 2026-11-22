@@ -286,12 +286,16 @@ def test_takeover_fences_the_old_leader_and_picks_the_freshest_node(ha):
     assert cluster.stores["s0-primary"].get(k_missed) == {"v": 1, "version": 1}  # caught up
     assert b.put(f"/store/{k_old}", json={"v": 2}, headers={"If-Match": "1"}).status_code == 200
 
-    # coord-a wakes up believing it still leads (it froze mid-way) and tries a write
-    # with its old epoch 0. The node knows epoch 1 and refuses it.
+    # coord-a wakes up believing it still leads: it froze in the middle of handling a
+    # write, AFTER its leader check. Recreate that state (its registry as it was, and an
+    # elector that renewed and announced leadership "just now"), then let the write go
+    # on with its old epoch 0. The node knows epoch 1 and refuses it.
     leader_a = app_a.state.leadership
-    leader_a.elector._leading, leader_a.elector._last_renew = True, leader_a.elector._clock()
     for node_id in order:
         app_a.state.registry.register(node_id, int(node_id[1]), node_id.split("-")[1], f"http://{node_id}")
+    e = leader_a.elector
+    e._leading = e._announced = True
+    e._last_renew = e._clock()
     r = a.put(f"/store/{k_old}", json={"v": 99}, headers={"If-Match": "2"})
     assert r.status_code == 503 and "no longer the leader" in r.json()["detail"]
     assert leader_a.is_leader() is False  # and it stepped down
