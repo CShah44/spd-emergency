@@ -8,6 +8,10 @@ shared and the system stays available.
 A batch of requests goes through RabbitMQ; the matching pods' logs then show how
 many of those requests each pod handled. Needs the Kubernetes stack running and
 scripts/k8s_forward.py in another terminal.
+
+With KEDA installed (scripts/k8s_up.py does that) the number of matching pods is set by the
+queue length, and would undo `kubectl scale` within seconds. So here KEDA is paused at the
+number you ask for, and handed back at the end. For autoscaling itself see demo_k8s_keda.py.
 """
 
 import argparse
@@ -31,6 +35,24 @@ def replicas() -> tuple[int, int]:
     """(desired, ready)"""
     desired = int(kubectl("get", "deploy", APP, "-o", "jsonpath={.spec.replicas}"))
     return desired, int(kubectl("get", "deploy", APP, "-o", "jsonpath={.status.readyReplicas}") or 0)
+
+
+def keda_managed() -> bool:
+    return subprocess.run(["kubectl", "-n", NAMESPACE, "get", "scaledobject", APP], capture_output=True).returncode == 0
+
+
+def set_replicas(count: int) -> None:
+    if keda_managed():
+        kubectl("annotate", "scaledobject", APP, f"autoscaling.keda.sh/paused-replicas={count}", "--overwrite")
+    else:
+        kubectl("scale", f"deploy/{APP}", f"--replicas={count}")
+
+
+def hand_back(original: int) -> None:
+    if keda_managed():  # KEDA picks the number again: back to the minimum once the queue is empty
+        kubectl("annotate", "scaledobject", APP, "autoscaling.keda.sh/paused-replicas-")
+    else:
+        kubectl("scale", f"deploy/{APP}", f"--replicas={original}")
 
 
 def handled_per_pod(request_ids: set[str]) -> dict[str, int]:
@@ -60,7 +82,7 @@ def main() -> None:
     print("   " + kubectl("get", "pods", "-l", f"app={APP}").rstrip().replace("\n", "\n   "))
 
     step(f"SCALING to {args.replicas} replicas")
-    kubectl("scale", f"deploy/{APP}", f"--replicas={args.replicas}")
+    set_replicas(args.replicas)
     took = wait_for(lambda: replicas() == (args.replicas, args.replicas), 120)
     good = check(took is not None, f"{args.replicas} pods ready" + (f" after {took:.1f}s" if took else ""))
     print("   " + kubectl("get", "pods", "-l", f"app={APP}").rstrip().replace("\n", "\n   "))
@@ -78,9 +100,9 @@ def main() -> None:
         print(f"   {pod:<34} handled {n:>4} requests  " + "#" * round(40 * n / args.requests))
     good &= check(len(counts) > 1, f"{len(counts)} different pods shared the work")
 
-    if args.restore:
-        step(f"RESTORING {original} replicas")
-        kubectl("scale", f"deploy/{APP}", f"--replicas={original}")
+    if args.restore or keda_managed():  # never leave KEDA paused
+        step(f"RESTORING {original} replicas" if not keda_managed() else "Handing the replica count back to KEDA")
+        hand_back(original)
 
     print()
     sys.exit(0 if good else 1)

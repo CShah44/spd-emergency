@@ -1,0 +1,66 @@
+# [B] Autoscaling for the matching service, with KEDA (https://keda.sh).
+#
+# KEDA watches the length of the RabbitMQ queue `match.requests` and sets the number of
+# matching-service pods: about one pod for every 20 requests waiting, never fewer than 1 and
+# never more than 5. A load spike therefore takes the matchers from 1 to 5, and once the
+# queue is empty again they go back down to 1.
+#
+# This needs KEDA installed in the cluster (scripts/k8s_up.py does that first), so it is NOT part
+# of `kubectl apply -k k8s/`. Docker Compose has no KEDA: there you set the count by hand with
+# `docker compose up -d --scale matching-service=3`.
+#
+# To fix the pod count by hand while this exists (a demo, for example), pause KEDA at that number:
+#   kubectl -n emergency annotate scaledobject matching-service autoscaling.keda.sh/paused-replicas=4 --overwrite
+# and hand control back with:
+#   kubectl -n emergency annotate scaledobject matching-service autoscaling.keda.sh/paused-replicas-
+# KEDA runs in its own namespace, where the short name "rabbitmq" does not resolve, so it is
+# given the full service name. (guest / guest is RabbitMQ's default login, the same one the
+# services use in k8s/configmap.yaml; a real deployment would put its own credentials here.)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keda-rabbitmq
+  namespace: emergency
+type: Opaque
+stringData:
+  host: amqp://guest:guest@rabbitmq.emergency.svc.cluster.local:5672/
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-rabbitmq
+  namespace: emergency
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: keda-rabbitmq
+      key: host
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: matching-service
+  namespace: emergency
+spec:
+  scaleTargetRef:
+    name: matching-service # the Deployment in matching-service.yaml
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies: [{type: Pods, value: 4, periodSeconds: 15}] # up to 1 -> 5 in one step
+        scaleDown:
+          stabilizationWindowSeconds: 60 # wait a minute of low load before removing pods (default is 5 minutes)
+          policies: [{type: Percent, value: 100, periodSeconds: 15}]
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        queueName: match.requests
+        mode: QueueLength
+        value: "20" # target: about 20 waiting requests per matching pod
+      authenticationRef:
+        name: keda-rabbitmq # where the broker is (above)

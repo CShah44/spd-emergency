@@ -121,6 +121,15 @@ python scripts/k8s_down.py --wipe     # also delete the system and all its data 
 
 Useful while it runs: `kubectl -n emergency get pods`, `kubectl -n emergency logs deploy/coordinator`.
 
+**Autoscaling.** `k8s_up.py` also installs [KEDA](https://keda.sh) (it needs internet the first
+time). It watches the length of the RabbitMQ queue and sets the number of matching pods: about one
+pod for every 20 requests waiting, never fewer than 1 and never more than 5
+(`k8s/keda/matching-scaledobject.yaml`). A load spike takes the matchers from 1 to 5 and, once the
+queue is empty, back to 1: `python scripts/demo_k8s_keda.py` runs that and shows it, and the
+Grafana panel "Matching pods and the queue" draws it. KEDA owns the pod count, so `kubectl scale`
+is undone within seconds; to hold a number, pause KEDA at it (the comments in that file say how).
+Docker Compose has no KEDA: there the count is fixed with `--scale`.
+
 ## The Delta Command web page
 
 Open **http://localhost:8081** (Compose or Kubernetes). It refreshes by itself every second.
@@ -215,6 +224,7 @@ Each script prints a before / during / after view.
 | `demo_async.py` | 40 requests at once flow through RabbitMQ; nobody is assigned twice |
 | `demo_k8s_recovery.py --app matching-service` | Delete an app pod; Kubernetes replaces it and no request is lost |
 | `demo_k8s_scaling.py --replicas 4` | Scale the matchers up; work spreads across the pods |
+| `demo_k8s_keda.py` | A load spike: KEDA takes the matchers from 1 to 5 and back, nothing lost |
 
 ## Tests
 

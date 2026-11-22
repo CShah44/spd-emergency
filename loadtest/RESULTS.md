@@ -41,3 +41,19 @@ a clean start. Each row registers 1.5 responders per planned request in five cit
 The steady rows were run with an earlier version of the verifier that waited a fixed 60 s; every
 request was already answered by then, so the final verifier gives the same result. The other
 three rows were rerun with the final one.
+
+## With KEDA autoscaling (task 6)
+
+The same scenario as the baseline "overload" row (20 req/s for 60 s, fresh cluster, same machine). The
+matchers now start at 1 and KEDA sets their number from the queue length (about one per 20 waiting
+requests, 1 to 5). Over the run the matchers went from 1 to 5 and the queue peaked at 280 waiting requests.
+
+| scenario | rate (req/s) | duration | accepted | refused | matched | unmatched | p50 | p95 | p99 | lost | double-assigned | recovery | date |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| overload-keda | 20 | 60 s | 1180 | 0 | 1180 | 0 | 10.44 s | 46.55 s | 57.31 s | 0 | 0 | - | 2026-11-22 |
+
+Against two fixed matchers in the baseline, the median wait fell from 89 s to 10.4 s and the p99 from
+over 120 s to 57 s, with nothing lost in either. It is still slow: the queue peaked about when the load
+stopped, so even five matchers did not keep up with 20 requests a second at this data size. The
+autoscaler reacts to a queue that has already formed, and each match still scans every responder
+(see the baseline notes), which geo-sharding is meant to cut.

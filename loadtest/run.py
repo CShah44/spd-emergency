@@ -157,8 +157,9 @@ def result_row(label: str, rate: float, duration: int, accepted: int, refused: i
 
 def record(row: str) -> None:
     if not RESULTS_MD.exists():
-        RESULTS_MD.write_text("# Load test results\n\nOne row per run of `python loadtest/run.py --record <name>`.\n\n" + TABLE_HEADER)
-    with open(RESULTS_MD, "a") as f:
+        with open(RESULTS_MD, "w", newline="\n") as f:
+            f.write("# Load test results\n\nOne row per run of `python loadtest/run.py --record <name>`.\n\n" + TABLE_HEADER)
+    with open(RESULTS_MD, "a", newline="\n") as f:  # plain newlines: the repo is LF everywhere
         f.write(row + "\n")
 
 
