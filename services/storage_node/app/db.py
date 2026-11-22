@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from common.models import utc_now_iso
+from common.sharding import key_in_cells
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (
@@ -254,15 +255,18 @@ class Store:
             row = self._conn.execute("SELECT version FROM kv WHERE key = ?", (key,)).fetchone()
         return 0 if row is None else row[0]
 
-    def scan(self, prefix: str = "", filters: dict[str, str] | None = None) -> list[dict[str, Any]]:
-        """Live records whose key starts with prefix, filtered by exact field matches."""
+    def scan(
+        self, prefix: str = "", filters: dict[str, str] | None = None, cells: set[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Live records whose key starts with prefix, filtered by exact field matches,
+        and, with `cells`, only keys in those geohash cells (or without a cell)."""
         filters = filters or {}
         with self._lock:
             rows = self._conn.execute(
-                "SELECT value_json, version FROM kv WHERE deleted = 0 AND substr(key, 1, ?) = ? ORDER BY key",
+                "SELECT key, value_json, version FROM kv WHERE deleted = 0 AND substr(key, 1, ?) = ? ORDER BY key",
                 (len(prefix), prefix),
             ).fetchall()
-        records = [_decode(body, version) for body, version in rows]
+        records = [_decode(body, version) for key, body, version in rows if key_in_cells(key, cells)]
         return [r for r in records if all(str(r.get(f)) == v for f, v in filters.items())]
 
     def sync_entries(self, prefix: str = "") -> list[dict[str, Any]]:

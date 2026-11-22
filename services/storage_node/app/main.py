@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from common import config, metrics
 from common.models import utc_now_iso
+from common.sharding import CELLS_PARAM, parse_cells
 
 from .db import Conflict, NotFound, Store
 from .heartbeat import heartbeat_loop
@@ -277,8 +278,14 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
 
     @app.get("/internal/data")
     def query_data(request: Request, prefix: str = "") -> list[dict[str, Any]]:
-        filters = {k: v for k, v in request.query_params.items() if k != "prefix"}
-        return store().scan(prefix, filters)
+        """?prefix=&field=value..., and optionally ?cells=: only keys in those geohash
+        cells (plus old-style keys without a cell; common/sharding.key_in_cells)."""
+        filters = {k: v for k, v in request.query_params.items() if k not in ("prefix", CELLS_PARAM)}
+        try:
+            cells = parse_cells(request.query_params.get(CELLS_PARAM))
+        except ValueError as exc:
+            raise HTTPException(400, detail=str(exc))
+        return store().scan(prefix, filters, cells)
 
     # -- replication and recovery ---------------------------------------------------------
 
