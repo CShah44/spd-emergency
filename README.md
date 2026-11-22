@@ -164,8 +164,15 @@ nothing to set up by hand, on Compose or on Kubernetes (where `k8s_up.py` loads 
 Rows: cluster health, throughput (requests and matches per second), latency (p50 / p95 / p99
 from request created to answered), the queue (waiting, matchers listening, dead letters),
 replication and recovery, and the coordinator (leader and term). Queue depth comes from RabbitMQ's
-own Prometheus plugin (`observability/rabbitmq/enabled_plugins`). The storage rows fill in as
-the storage nodes and coordinator start exposing their metrics.
+own Prometheus plugin (`observability/rabbitmq/enabled_plugins`).
+
+On the storage side, the coordinator's view of the cluster (node states, available shards,
+replication lag) is reported by the **leader only**: Prometheus scrapes both coordinator pods,
+and a standby removes those series instead of leaving stale ones. Besides the agreed names,
+the storage side also reports `spd_replication_lag_writes` (writes a node hasn't received from
+its partner, from the operation log), `spd_recovery_total{mode}` (catch-ups from the log vs.
+full syncs), `spd_fenced_total` (calls refused for an old coordinator epoch) and
+`spd_coordinator_settle_seconds` (a new leader's wait for the nodes).
 
 Start measurements from `--fresh` (Kubernetes) or `docker compose down -v` (Compose): old data
 from earlier runs is matched by the sweeper and shows up as very slow requests.

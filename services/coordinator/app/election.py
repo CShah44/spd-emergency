@@ -244,6 +244,10 @@ class LeaderElector:
     def holder(self) -> str | None:
         return self._observed.holder if self._observed else None
 
+    def observed_epoch(self) -> int | None:
+        """The current term as seen on the lease, also when someone else leads."""
+        return self._observed.transitions if self._observed else self.epoch
+
     async def run(self) -> None:
         while not self._stopped:
             await self.tick()

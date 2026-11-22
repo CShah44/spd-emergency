@@ -27,6 +27,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
+from common import metrics
+
 from .election import LeaderElector
 from .registry import ROLES, Registry
 
@@ -175,6 +177,7 @@ class Leadership:
             if ordered:
                 leaders[shard] = ordered[0]["node_id"]
         self.settling = False
+        metrics.SETTLE_SECONDS.observe(loop.time() - started)
         self.last_takeover = {
             "epoch": epoch,
             "nodes_registered": len(self.pending),

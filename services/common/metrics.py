@@ -42,6 +42,17 @@ STORAGE_KEYS = Gauge("spd_storage_keys", "Records held by a storage node", ["nod
 COORDINATOR_IS_LEADER = Gauge("spd_coordinator_is_leader", "1 if this coordinator pod is the leader", ["pod"])
 COORDINATOR_EPOCH = Gauge("spd_coordinator_epoch", "The leader term this coordinator pod last saw", ["pod"])
 SHARDS_PER_QUERY = Histogram("spd_shards_per_query", "Shards asked to answer one query", buckets=(1, 2, 3))
+# Added with tasks 3 and 4 (the operation log, coordinator HA):
+REPLICATION_LAG = Gauge(
+    "spd_replication_lag_writes", "Writes of its partner a storage node has not received yet (operation log)",
+    ["shard", "node"],
+)
+RECOVERIES = Counter("spd_recovery_total", "Catch-ups of a returning node, by how they were done", ["node", "mode"])
+FENCED = Counter("spd_fenced_total", "Calls a storage node refused because they carried an old coordinator epoch", ["node"])
+SETTLE_SECONDS = Histogram(
+    "spd_coordinator_settle_seconds", "How long a new coordinator leader waited for the storage nodes before serving",
+    buckets=(0.5, 1, 2, 3, 4, 5, 7, 10, 15),
+)
 
 # -- app side [B] ------------------------------------------------------------------------------------
 

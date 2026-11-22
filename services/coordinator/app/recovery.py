@@ -39,6 +39,8 @@ from typing import Any
 
 import httpx
 
+from common import metrics
+
 from .registry import RECOVERING, UP, Node, Registry
 from .router import Fenced
 
@@ -67,7 +69,8 @@ async def recover(
         )
         if partner is None:
             # The partner died meanwhile: our own data is the best copy left.
-            registry.finish_recovery(node_id, generation, {"partner": None, "note": "no live partner"})
+            if registry.finish_recovery(node_id, generation, {"partner": None, "note": "no live partner"}):
+                metrics.RECOVERIES.labels(node_id, "alone").inc()
             return
         try:
             report = await _sync_pair(http, node, partner, mode)
@@ -78,7 +81,10 @@ async def recover(
             if exc.node.node_id == node_id:
                 return  # the recovering node itself is gone; it will register again
             continue  # the partner is gone; look again (probably finish with our own data)
-        registry.finish_recovery(node_id, generation, report)
+        if registry.finish_recovery(node_id, generation, report):
+            metrics.RECOVERIES.labels(node_id, report["mode"]).inc()
+            metrics.RECOVERY_SECONDS.labels(node_id).observe(report["seconds"])
+            metrics.RECOVERY_ENTRIES.labels(node_id).inc(report["pulled"])
         return
 
 

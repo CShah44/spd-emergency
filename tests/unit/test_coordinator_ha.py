@@ -237,8 +237,9 @@ def _register_all(cluster, http):
 
 
 def test_only_the_leader_serves(ha):
-    cluster, a, b, *_ = ha
+    cluster, a, b, app_a, app_b, _ = ha
     _register_all(cluster, a)
+    assert app_b.state.leadership.elector.observed_epoch() == app_a.state.leadership.epoch == 0
     key = _key_on_shard(0, "k")
     assert a.put(f"/store/{key}", json={"x": 1}).status_code == 200
     assert b.get("/ready").status_code == 503 and b.get("/internal/leader").json()["is_leader"] is False

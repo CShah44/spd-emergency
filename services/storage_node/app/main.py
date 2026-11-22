@@ -16,6 +16,7 @@ replica can track how far it is caught up (db.py, "operation log").
     GET    /health                       identity + key count (503 while paused): readiness
     GET    /livez                        process is alive (even while paused): liveness
     POST   /admin/pause | /admin/resume  simulate a failure on demand (demos)
+    GET    /metrics                      Prometheus metrics (common/metrics.py)
 
 Settings come from environment variables (see NodeSettings.from_env).
 Run locally:
@@ -36,7 +37,7 @@ from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Respon
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from common import config
+from common import config, metrics
 from common.models import utc_now_iso
 
 from .db import Conflict, NotFound, Store
@@ -176,16 +177,26 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
         # Open the database at startup (not at import), so importing this
         # module never creates files.
         state.store = Store(Path(settings.data_dir) / f"{settings.node_id}.db")
-        task = asyncio.create_task(heartbeat_loop(state)) if settings.heartbeat_enabled else None
+        tasks = [asyncio.create_task(count_keys())]
+        if settings.heartbeat_enabled:
+            tasks.append(asyncio.create_task(heartbeat_loop(state)))
         yield
-        if task:
+        for task in tasks:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.gather(*tasks, return_exceptions=True)
         state.store.close()
+
+    async def count_keys(every_s: float = 5.0) -> None:
+        """spd_storage_keys, refreshed every few seconds (a COUNT per write would be waste)."""
+        keys = metrics.STORAGE_KEYS.labels(settings.node_id)
+        while True:
+            keys.set(state.store.count())
+            await asyncio.sleep(every_s)
 
     app = FastAPI(title=f"Storage node {settings.node_id}", lifespan=lifespan)
     app.state.node = state
+    metrics.instrument(app, "storage-node")  # GET /metrics (503 while paused, like everything else)
 
     def store() -> Store:
         assert state.store is not None, "store is opened in lifespan"
@@ -204,6 +215,7 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
                 return JSONResponse({"detail": f"bad {EPOCH_HEADER}: {raw!r}"}, status_code=400)
             known = store().check_epoch(int(raw))
             if known is not None:
+                metrics.FENCED.labels(settings.node_id).inc()
                 return JSONResponse(
                     {"detail": {"error": "fenced", "epoch": known, "yours": int(raw)}}, status_code=409
                 )

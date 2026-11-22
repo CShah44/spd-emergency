@@ -30,6 +30,7 @@ from urllib.parse import quote
 
 import httpx
 
+from common import metrics
 from common.sharding import shard_for
 
 from .registry import Node, Registry
@@ -113,6 +114,7 @@ class Router:
             _, resp = await self._first_live(shard, "GET", "/internal/data", params=params, is_write=False)
             return _ok_json(resp)
 
+        metrics.SHARDS_PER_QUERY.observe(self.registry.num_shards)
         per_shard = await asyncio.gather(*(one(s) for s in range(self.registry.num_shards)))
         return [record for records in per_shard for record in records]
 
@@ -153,6 +155,7 @@ class Router:
             except httpx.HTTPError as exc:
                 # Don't fail the client: the write is durable on `written_on`.
                 # Marking the replica DOWN forces it to catch up before it is used again.
+                metrics.REPLICATION_FAILURES.labels(str(shard)).inc()
                 self.registry.mark_down(target.node_id, f"replication of {key} failed: {exc!r}")
 
 
