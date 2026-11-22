@@ -1,0 +1,83 @@
+# [B] Grafana: draws the dashboard. Nothing to click: the data source and the dashboard are
+# provisioned from files, the same ones Docker Compose uses (observability/grafana/).
+#
+# The dashboard JSON is too big to keep in two places, so it is NOT written here:
+# scripts/k8s_up.py loads observability/grafana/dashboards/ into the ConfigMap
+# `grafana-dashboards` before applying this file. (optional: true lets Grafana still start
+# if you apply the manifests by hand; it just shows no dashboard until that ConfigMap exists.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+  namespace: emergency
+data:
+  datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        jsonData:
+          timeInterval: 5s
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: spd
+        type: file
+        disableDeletion: true
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: emergency
+  labels: {app: grafana}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: grafana}
+  template:
+    metadata:
+      labels: {app: grafana}
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.3.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"} # open without logging in (read-only); admin / admin to edit
+            - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Viewer}
+            - {name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH, value: /var/lib/grafana/dashboards/spd.json}
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet: {path: /api/health, port: 3000}
+            periodSeconds: 5
+          volumeMounts:
+            - {name: dashboards, mountPath: /var/lib/grafana/dashboards, readOnly: true}
+            - {name: provisioning, mountPath: /etc/grafana/provisioning/datasources/datasource.yaml, subPath: datasource.yaml, readOnly: true}
+            - {name: provisioning, mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml, subPath: dashboards.yaml, readOnly: true}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+      volumes:
+        - name: provisioning
+          configMap: {name: grafana-provisioning}
+        - name: dashboards
+          configMap: {name: grafana-dashboards, optional: true}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: emergency
+spec:
+  selector: {app: grafana}
+  ports:
+    - {port: 3000, targetPort: 3000}

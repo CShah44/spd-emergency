@@ -70,6 +70,14 @@ def deploy(rebuilt: bool) -> None:
     # RabbitMQ used to be a Deployment; it is a StatefulSet now (it needs a disk). Remove the
     # old one so a cluster created before that change doesn't end up with two brokers.
     k.kubectl("delete", "deploy", "rabbitmq", "--ignore-not-found", quiet=True)
+    # Grafana's dashboard lives in observability/grafana/dashboards (Docker Compose reads it from
+    # there too). kustomize can't load files from outside k8s/, so make its ConfigMap here first.
+    k.run("kubectl", "apply", "-f", "k8s/namespace.yaml", quiet=True)
+    manifest = k.run(
+        "kubectl", "create", "configmap", "grafana-dashboards", "-n", k.NAMESPACE,
+        "--from-file=observability/grafana/dashboards", "--dry-run=client", "-o", "yaml", quiet=True,
+    ).stdout
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest, text=True, check=True, cwd=k.ROOT, capture_output=True)
     k.run("kubectl", "apply", "-k", "k8s")
     if existed and rebuilt:
         # Same image tag, new content: Kubernetes won't notice, so restart our own pods.
@@ -80,7 +88,7 @@ def deploy(rebuilt: bool) -> None:
 
 def wait_ready() -> None:
     k.step("Waiting for every pod to be ready")
-    for kind, names in (("statefulset", k.STATEFULSETS), ("deploy", k.DEPLOYMENTS)):
+    for kind, names in (("statefulset", k.STATEFULSETS), ("deploy", k.DEPLOYMENTS + k.OBSERVABILITY)):
         for name in names:
             k.kubectl("rollout", "status", f"{kind}/{name}", "--timeout=300s", quiet=True)
             print(f"   {name}")
@@ -142,6 +150,8 @@ def main() -> int:
         "   Client API + Swagger UI : http://localhost:8080/docs\n"
         "   Coordinator status      : http://localhost:8000/internal/status\n"
         "   RabbitMQ UI             : http://localhost:15672   (guest / guest)\n"
+        "   Grafana dashboard       : http://localhost:3000\n"
+        "   Prometheus              : http://localhost:9090\n"
         "   Pods                    : kubectl -n emergency get pods\n"
         "   Stop everything         : python scripts/k8s_down.py"
     )

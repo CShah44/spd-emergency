@@ -9,6 +9,15 @@
 # The queue is durable and the messages are persistent (common/messaging.py), so
 # RabbitMQ writes them to that disk. Services reconnect by themselves while the
 # broker restarts (the matching consumer retries every 3 s).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-plugins # the plugin list; adds rabbitmq_prometheus so queue depth can be graphed
+  namespace: emergency
+data:
+  enabled_plugins: |
+    [rabbitmq_management,rabbitmq_prometheus].
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -31,8 +40,10 @@ spec:
           ports:
             - {name: amqp, containerPort: 5672}
             - {name: management, containerPort: 15672} # UI: kubectl port-forward -n emergency svc/rabbitmq 15672
+            - {name: prometheus, containerPort: 15692} # metrics, read by Prometheus
           volumeMounts:
             - {name: data, mountPath: /var/lib/rabbitmq}
+            - {name: plugins, mountPath: /etc/rabbitmq/enabled_plugins, subPath: enabled_plugins, readOnly: true}
           readinessProbe:
             exec: {command: ["rabbitmq-diagnostics", "-q", "ping"]}
             initialDelaySeconds: 10
@@ -46,6 +57,9 @@ spec:
           resources:
             requests: {cpu: 100m, memory: 256Mi}
             limits: {cpu: "1", memory: 512Mi}
+      volumes:
+        - name: plugins
+          configMap: {name: rabbitmq-plugins}
   volumeClaimTemplates:
     - metadata:
         name: data
