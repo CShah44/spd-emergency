@@ -1,0 +1,45 @@
+# Prometheus for Docker Compose: who to ask for metrics, and how often.
+# (The Kubernetes version, which finds pods by itself, is k8s/observability/prometheus.yaml.)
+#
+# Every service answers GET /metrics. Each job name is the service's name, and the Grafana
+# dashboard (observability/grafana/dashboards/spd.json) relies on them.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: request-service
+    static_configs:
+      - targets: ["request-service:8000"]
+
+  # `docker compose up -d --scale matching-service=3` gives the name several addresses:
+  # ask Docker's DNS every few seconds and scrape every one of them.
+  - job_name: matching-service
+    dns_sd_configs:
+      - names: ["matching-service"]
+        type: A
+        port: 8000
+        refresh_interval: 5s
+
+  - job_name: coordinator
+    static_configs:
+      - targets: ["coordinator:8000"]
+
+  - job_name: storage-node
+    static_configs:
+      - targets:
+          - storage-s0-primary:9000
+          - storage-s0-replica:9000
+          - storage-s1-primary:9000
+          - storage-s1-replica:9000
+          - storage-s2-primary:9000
+          - storage-s2-replica:9000
+
+  # RabbitMQ's own metrics. The default endpoint only adds up all queues; the "detailed"
+  # one gives the numbers per queue (messages waiting, consumers), which is what we plot.
+  - job_name: rabbitmq
+    metrics_path: /metrics/detailed
+    params:
+      family: [queue_coarse_metrics, queue_consumer_count]
+    static_configs:
+      - targets: ["rabbitmq:15692"]
