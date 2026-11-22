@@ -1,0 +1,141 @@
+"""The load test's verdict: which requests count as lost, and what counts as a responder given twice.
+If this check were wrong, every "lost requests = 0" number would be meaningless."""
+
+import itertools
+
+from loadtest import verify
+from loadtest.run import match_latency, result_row, seconds
+
+
+def req(rid, status, resource=None):
+    return {"id": rid, "status": status, "assigned_resource_id": resource}
+
+
+def res(rid, status="ASSIGNED", holder=None):
+    return {"id": rid, "status": status, "assigned_request_id": holder}
+
+
+# -- classify ----------------------------------------------------------------------------------------
+
+def test_matched_and_unmatched_are_both_answers():
+    requests = {"r1": req("r1", "MATCHED", "x1"), "r2": req("r2", "UNMATCHED")}
+
+    report = verify.classify(["r1", "r2"], requests, [res("x1", holder="r1")])
+
+    assert (report.matched, report.unmatched, report.lost) == (1, 1, 0) and report.ok
+
+
+def test_a_request_still_pending_is_lost():
+    report = verify.classify(["r1"], {"r1": req("r1", "PENDING")}, [])
+
+    assert report.pending == 1 and report.lost == 1 and not report.ok
+
+
+def test_a_missing_or_unreadable_request_is_lost():
+    report = verify.classify(["r1", "r2", "r3"], {"r1": "missing", "r2": "unreadable"}, [])
+
+    assert (report.missing, report.unreadable, report.lost) == (1, 2, 3)
+
+
+def test_one_responder_for_two_requests_is_double_assignment():
+    requests = {"r1": req("r1", "MATCHED", "x1"), "r2": req("r2", "MATCHED", "x1")}
+
+    report = verify.classify(["r1", "r2"], requests, [res("x1", holder="r1")])
+
+    assert len(report.double_assigned) == 1 and "r1" in report.double_assigned[0] and "r2" in report.double_assigned[0]
+    assert not report.ok
+
+
+def test_a_matched_request_whose_responder_points_elsewhere_is_inconsistent():
+    requests = {"r1": req("r1", "MATCHED", "x1")}
+
+    report = verify.classify(["r1"], requests, [res("x1", holder="someone-else")])
+
+    assert report.inconsistent == ["r1 -> x1"] and not report.ok
+
+
+def test_a_matched_request_whose_responder_is_free_again_is_inconsistent():
+    report = verify.classify(["r1"], {"r1": req("r1", "MATCHED", "x1")}, [res("x1", status="AVAILABLE")])
+
+    assert report.inconsistent == ["r1 -> x1"]
+
+
+def test_a_responder_held_for_a_request_that_never_got_it_is_a_leaked_claim():
+    requests = {"r1": req("r1", "UNMATCHED")}
+
+    report = verify.classify(["r1"], requests, [res("x1", holder="r1")])
+
+    assert report.leaked == ["x1 held for r1"] and not report.ok
+
+
+def test_responders_held_for_requests_outside_the_run_are_ignored():
+    report = verify.classify(["r1"], {"r1": req("r1", "UNMATCHED")}, [res("x9", holder="from-an-earlier-run")])
+
+    assert report.ok
+
+
+def test_a_clean_run_with_many_requests_is_ok():
+    ids = [f"r{n}" for n in range(50)]
+    requests = {i: req(i, "MATCHED", f"x{n}") for n, i in enumerate(ids)}
+    resources = [res(f"x{n}", holder=i) for n, i in enumerate(ids)]
+
+    report = verify.classify(ids, requests, resources)
+
+    assert report.matched == 50 and report.ok
+
+
+# -- waiting for answers ---------------------------------------------------------------------------------
+
+def test_requests_answered_late_are_picked_up_by_asking_again():
+    calls = itertools.count()
+    answers = {"r1": [req("r1", "PENDING"), req("r1", "PENDING"), req("r1", "MATCHED", "x1")], "r2": [req("r2", "UNMATCHED")]}
+    seen = {"r1": 0, "r2": 0}
+
+    def get(request_id):
+        next(calls)
+        record = answers[request_id][min(seen[request_id], len(answers[request_id]) - 1)]
+        seen[request_id] += 1
+        return record
+
+    results = verify.fetch_answers(["r1", "r2"], get, wait_s=5, interval_s=0)
+
+    assert results["r1"]["status"] == "MATCHED" and results["r2"]["status"] == "UNMATCHED"
+    assert seen["r2"] == 1  # an answered request is not asked about again
+
+
+def test_a_request_that_never_gets_answered_is_returned_pending_when_time_runs_out():
+    results = verify.fetch_answers(["r1"], lambda rid: req(rid, "PENDING"), wait_s=0.05, interval_s=0.01)
+
+    assert results["r1"]["status"] == "PENDING"
+
+
+def test_a_missing_request_is_not_asked_about_again():
+    seen = []
+
+    def get(request_id):
+        seen.append(request_id)
+        return "missing"
+
+    results = verify.fetch_answers(["r1"], get, wait_s=5, interval_s=0)
+
+    assert results["r1"] == "missing" and seen == ["r1"]
+
+
+# -- the result row --------------------------------------------------------------------------------------
+
+def test_durations_are_shown_in_a_readable_unit():
+    assert seconds(0.0734) == "73 ms" and seconds(2.5) == "2.50 s" and seconds(None) == "n/a"
+
+
+def test_the_row_has_one_cell_per_column():
+    report = verify.classify(["r1"], {"r1": req("r1", "MATCHED", "x1")}, [res("x1", holder="r1")])
+
+    row = result_row("steady", 20, 30, 1, report, {"p50": 0.07, "p95": 0.1, "p99": 0.2, "observed": 1})
+
+    assert row.count("|") == 14 and "| steady | 20 | 30 s | 1 | 1 | 0 | 70 ms | 100 ms | 200 ms | 0 | 0 |" in row
+
+
+def test_latency_is_n_a_when_prometheus_is_unreachable():
+    latency = match_latency("http://127.0.0.1:9", 30)
+
+    assert latency["p50"] is None and latency["observed"] is None
