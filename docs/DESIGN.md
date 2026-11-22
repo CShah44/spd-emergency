@@ -75,7 +75,7 @@ Any status change that isn't allowed above is rejected with **409**.
 
 | Field | Set by | Required on create | Rules |
 |---|---|---|---|
-| `id` | system | – | `req-` + 16 hex characters (random) |
+| `id` | system | – | `req-` + 16 hex characters (random). With geo-sharding (the default) it is `req-<cell>-<16 hex>`, where `<cell>` is the 3-character geohash of the request's location (section 6). Ids without a cell still work |
 | `type` | client | yes | One of the fixed types |
 | `location.lat` | client | yes | Number, -90 to 90 |
 | `location.lon` | client | yes | Number, -180 to 180 |
@@ -85,6 +85,7 @@ Any status change that isn't allowed above is rejected with **409**.
 | `status` | system | – | Starts as `PENDING` |
 | `assigned_resource_id` | system | – | Filled when matched |
 | `created_at`, `updated_at` | system | – | UTC, ISO 8601 |
+| `created_ts` | system | – | When the request was created, in seconds since 1970 with fractions. `created_at` only has whole seconds, so the matcher times itself against this (`spd_match_e2e_seconds`). Records from before it was added don't have it |
 | `version` | system | – | Starts at 1, goes up by 1 on every change (see section 5) |
 
 ## 3. Resource (someone who can help)
@@ -108,7 +109,7 @@ Any status change that isn't allowed above is rejected with **409**.
 
 | Field | Set by | Required on create | Rules |
 |---|---|---|---|
-| `id` | system | – | `res-` + 16 hex characters |
+| `id` | system | – | `res-` + 16 hex characters, or `res-<cell>-<16 hex>` with geo-sharding (the cell of the resource's location; see section 6) |
 | `type` | client | yes | One of the fixed types |
 | `name` | client | yes | Who or what this is (a volunteer, NGO, truck…) |
 | `location.lat` / `.lon` | client | yes | Same rules as for requests |
@@ -131,6 +132,10 @@ For one request:
 5. **Claim** the first candidate, *only if it is still free* (section 5). If someone else got it first, try the next.
 6. On success: resource → `ASSIGNED` with `assigned_request_id`, and request → `MATCHED` with `assigned_resource_id`.
 7. If no candidate is left: request → `UNMATCHED`.
+
+**Where the candidates are looked for (geo-sharding, `GEO_SHARDING`, on by default).** Step 1 first asks only the shards that own the request's geohash cell and its 8 neighbours. Together they cover the 50 km limit, so a match usually touches one or two shards instead of three. If nobody in those cells can be claimed, the matcher asks every shard once more (this is also what finds records from before geo-sharding). When the radius is too big for nine cells to be sure to cover it (a large `MAX_MATCH_KM`, or far north, where cells are narrow: `geohash.cells_cover`), it asks every shard directly. The lookup for "is a responder already assigned to this request" uses the same cells. With `GEO_SHARDING=false` every query asks every shard, as before.
+
+Matching is triggered when a request is created, when it is retried (`UNMATCHED` to `PENDING`) and by `POST /match/{id}`. An `UNMATCHED` request is not retried by itself.
 
 ## 5. "Only if still free" (stops double assignment)
 
@@ -159,6 +164,8 @@ The Request Service publishes this when a request is created. The Matching Servi
 - Exchange `emergency` (direct), queue `match.requests` (durable), persistent messages.
 - The consumer acks **only after** the request is `MATCHED` or `UNMATCHED`.
 - A message that fails 3 times goes to `match.requests.dlq`.
+- A request is saved before it is queued, so a broker outage can leave one saved but never queued. A **sweeper** in every matching pod (every `SWEEP_INTERVAL_S` = 30 s) matches requests that have been `PENDING` for more than `PENDING_STALE_AFTER_S` = 60 s. Matching is safe to repeat, so it can run next to the consumer.
+- The number of matching pods is set by KEDA from the queue length (1 to 5, about one per 20 waiting requests; `k8s/keda/`). Compose has no KEDA and uses a fixed `--scale`.
 
 ---
 
@@ -233,98 +240,79 @@ With `LEADER_ELECTION=kubernetes` (the Kubernetes manifests) two coordinator pod
 
 ---
 
-## 9. Recommended file structure
+## 9. File structure (as built)
 
 Owner tags: **[A]** storage side, **[B]** app side, **[Both]** shared. Each person edits only their own folders, which keeps merge conflicts rare.
 
 ```
-final-project/
+spd-emergency/
 ├── README.md                          [Both]  build, run, demo walkthrough, design choices
-├── docker-compose.yml                 [B]     starts everything locally (A adds the storage entries)
-├── requirements-dev.txt               [Both]  pytest, httpx: tools for running tests locally
-├── .gitignore
+├── docker-compose.yml                 [B]     starts everything locally (A owns the storage entries)
+├── requirements-dev.txt                       pytest, httpx, fastapi, pika, prometheus-client
+├── pytest.ini
 │
 ├── docs/
 │   ├── DESIGN.md                      [Both]  this file: the shared contract
-│   ├── BUILD_PLAN.md                  [Both]
-│   └── RESUME_ROADMAP.md              [Both]
+│   ├── BUILD_PLAN.md, RESUME_ROADMAP.md, UPGRADE_PLAN.md   the plans
+│   ├── GEO_SHARDING.md                [Both]  ids that carry a cell, regions on a ring, cells= queries
+│   ├── COORDINATOR_FAILOVER.md        [A]     measured failover of the two coordinators
+│   └── CATCHUP_BENCHMARK.md           [A]     operation log vs. full sync
 │
 ├── services/
-│   ├── common/                        [Both]  written together on day 1
-│   │   ├── models.py                          record shapes, fixed types, statuses, allowed moves
-│   │   ├── sharding.py                        shard_for(key) → 0, 1 or 2 (section 6)
+│   ├── common/                        [Both]
+│   │   ├── models.py                          record shapes, fixed types, statuses, allowed moves, id generation
+│   │   ├── sharding.py                [A]     shard_for(key): by region for geo ids, sha1 mod 3 otherwise (section 6)
+│   │   ├── geohash.py                 [B]     encode, neighbours, cells_around, cells_cover, cell_of_id
 │   │   ├── storage_client.py          [A]     the ONLY way B's services talk to the coordinator (section 8)
-│   │   └── config.py                          reads settings from environment variables
+│   │   ├── messaging.py               [B]     the RabbitMQ queue contract (section 7)
+│   │   ├── metrics.py                 [Both]  every spd_* metric, and instrument(app) for GET /metrics
+│   │   └── config.py                          settings from environment variables
 │   │
-│   ├── storage_node/                  [A]     the cabinet keeper (6 copies run)
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt
-│   │   └── app/
-│   │       ├── main.py                        /internal/data/{key}, /health
-│   │       ├── db.py                          SQLite table + "only if version matches" save
-│   │       └── heartbeat.py                   register on startup, then "I'm alive" every 3 s
+│   ├── storage_node/                  [A]     one SQLite file per node (6 run)
+│   │   └── app/   main.py, db.py (versioned records + operation log), heartbeat.py
 │   │
-│   ├── coordinator/                   [A]     the librarian
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt
-│   │   └── app/
-│   │       ├── main.py                        /store API, /internal/nodes/*, /internal/status
-│   │       ├── registry.py                    which nodes exist, up or down, heartbeat timeout
-│   │       ├── router.py                      key → shard → write primary + replica, read with fallback
-│   │       ├── recovery.py                    catch up a node that comes back
-│   │       └── fake.py                        in-memory fake coordinator for days 1–2
+│   ├── coordinator/                   [A]     the librarian (2 pods on Kubernetes, one leader)
+│   │   └── app/   main.py, registry.py, router.py, recovery.py, election.py + leadership.py
+│   │              (Lease election and fencing), state_metrics.py, fake.py (in-memory, used by the unit tests)
 │   │
 │   ├── request_service/               [B]     the front desk
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt
-│   │   └── app/
-│   │       ├── main.py                        client REST API (spec section 5)
-│   │       ├── schemas.py                     what a valid create/update body looks like
-│   │       └── publisher.py                   drops the slip in RabbitMQ
+│   │   └── app/   main.py (client API + the extra calls the web page needs), schemas.py, service.py,
+│   │              publisher.py (RabbitMQ, with queue statistics), cluster.py (storage view, demo controls)
 │   │
-│   └── matching_service/              [B]     the matchmaker
-│       ├── Dockerfile
-│       ├── requirements.txt
-│       └── app/
-│           ├── main.py                        POST /match/{id}, /health
-│           ├── consumer.py                    picks slips from RabbitMQ, acks when done
-│           ├── matcher.py                     filter → distance → sort → claim (section 4)
-│           └── geo.py                         haversine_km(): distance between two map points
+│   ├── matching_service/              [B]     the matchmaker
+│   │   └── app/   main.py (POST /match/{id}, /health), consumer.py, matcher.py, geo.py (haversine),
+│   │              sweeper.py (matches requests that were saved but never queued)
+│   │
+│   └── ui_service/                    [B]     the Delta Command web page
+│       ├── app/   FastAPI server: serves the page, streams the system's state (SSE), passes actions on
+│       └── web/   the Svelte app, built into the image
 │
-├── client/                            [B]
-│   └── cli.py                                 the "1 or more clients": create, get, register, match
+├── client/cli.py                      [B]     create, get, register, match from the command line
 │
 ├── k8s/
-│   ├── namespace.yaml                 [Both]
-│   ├── configmap.yaml                 [Both]  shared settings (URLs, timeouts, MAX_MATCH_KM)
-│   ├── coordinator.yaml               [A]     Deployment + Service
-│   ├── storage-shard0.yaml            [A]     StatefulSet (primary + replica) + headless Service + volumes
-│   ├── storage-shard1.yaml            [A]
-│   ├── storage-shard2.yaml            [A]
-│   ├── rabbitmq.yaml                  [B]     Deployment + Service
-│   ├── request-service.yaml           [B]     Deployment (2 replicas) + Service
-│   └── matching-service.yaml          [B]     Deployment (2 replicas) + Service
+│   ├── namespace.yaml, configmap.yaml, kustomization.yaml   [Both]
+│   ├── coordinator.yaml, storage-shard0..2.yaml             [A]     coordinators + election RBAC; StatefulSets
+│   ├── rabbitmq.yaml                  [B]     StatefulSet with its own disk, plus the plugin list
+│   ├── request-service.yaml, matching-service.yaml, ui-service.yaml   [B]
+│   ├── observability/                 [B]     Prometheus (finds pods itself) and Grafana
+│   └── keda/                          [B]     the ScaledObject for the matchers (applied after KEDA is installed)
+│
+├── observability/                     [B]     Prometheus config for Compose, Grafana data source and dashboard
+├── loadtest/                          [B]     Locust load, verify.py (lost / double-assigned), run.py, RESULTS.md
 │
 ├── scripts/
-│   ├── seed.py                        [B]     registers sample helpers across a few cities
-│   ├── demo_distribution.py           [A]     records spread across the 3 shards
-│   ├── demo_storage_failure.py        [A]     stop a node → system keeps working on the replica
-│   ├── demo_recovery.py               [A]     restart it → it catches up
-│   ├── demo_matching.py               [B]     create, register, match, look up
-│   ├── demo_async.py                  [B]     many requests flowing through RabbitMQ
-│   ├── demo_k8s_recovery.sh           [B]     kill a pod → Kubernetes restarts it
-│   └── demo_k8s_scaling.sh            [B]     scale the matchers up → still available
+│   ├── k8s_up.py, k8s_down.py, k8s_forward.py, _k8s.py      [B]     one-command Kubernetes start and stop
+│   ├── seed.py, demo_matching.py, demo_async.py             [B]
+│   ├── demo_k8s_recovery.py, demo_k8s_scaling.py, demo_k8s_keda.py   [B]
+│   ├── chaos.py                       [Both]  crash something under load and time the recovery
+│   ├── demo_distribution.py, demo_storage_failure.py, demo_recovery.py   [A]
+│   └── bench_catchup.py, measure_coordinator_failover.py    [A]
 │
 └── tests/
-    ├── unit/
-    │   ├── test_models.py             [Both]  fixed lists, allowed status moves
-    │   ├── test_sharding.py           [A]     same key → same shard, keys spread across all 3
-    │   └── test_matcher.py            [B]     right type, nearest first, 50 km limit
-    └── integration/                           run against the docker-compose stack
-        ├── test_storage_failover.py   [A]
-        ├── test_recovery_sync.py      [A]
-        ├── test_api.py                [B]     every client endpoint + error codes
-        └── test_concurrent_matching.py [B]    many matchers, no double assignment
+    ├── unit/                                  fast, no network: matcher, consumer, sweeper, request API,
+    │                                          geo matching, metrics, load-test verdict, UI server and model [B];
+    │                                          sharding, storage, coordinator, failover, op log, geo routing [A]
+    └── integration/                           run against a live Compose or Kubernetes stack
 ```
 
 Notes:
@@ -391,3 +379,16 @@ Notes:
 | Demos: distribution, storage failure, node recovery (§10) | A |
 | Demos: request, register, match, async, Kubernetes recovery, Kubernetes scaling (§10) | B |
 | Testing (§11) | Each for their half |
+
+### Upgrades after the spec (docs/UPGRADE_PLAN.md)
+
+| # | Task | Owner | Where |
+|---|---|---|---|
+| 1 | Metrics, Prometheus, Grafana | A (coordinator, storage nodes), B (app services, the stack) | `common/metrics.py`, `observability/`, `k8s/observability/` |
+| 2 | Load and chaos tests | B (load, verifier, matcher and broker scenarios), A (storage and coordinator scenarios) | `loadtest/`, `scripts/chaos.py` |
+| 3 | Two coordinators, leader election, fencing | A | section 8.3 |
+| 4 | Operation log for catch-up | A | section 8.2 |
+| 5 | Geo-sharding | A (regions, `cells=` routing), B (ids with a cell, cell search in the matcher) | sections 2, 3, 4, 6; `docs/GEO_SHARDING.md` |
+| 6 | KEDA autoscaling on queue length | B | section 7; `k8s/keda/` |
+
+The measured results of all of them are in `loadtest/RESULTS.md`.
