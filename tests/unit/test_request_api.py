@@ -1,6 +1,8 @@
 """The client REST API (spec section 5): success codes, error codes, status rules,
 and the hand-off to RabbitMQ and the matching service."""
 
+import re
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -54,7 +56,7 @@ def test_create_request(api, publisher, fake_store):
     r = api.post("/requests", json=REQUEST)
     assert r.status_code == 201
     body = r.json()
-    assert body["id"].startswith("req-") and len(body["id"]) == 20
+    assert re.fullmatch(r"req-tdr-[0-9a-f]{16}", body["id"])  # carries the geohash cell of Bengaluru
     assert body["status"] == "PENDING" and body["version"] == 1 and body["assigned_resource_id"] is None
     assert body["type"] == "water" and body["location"] == REQUEST["location"] and body["quantity"] == 20
     assert body["created_at"] == body["updated_at"]

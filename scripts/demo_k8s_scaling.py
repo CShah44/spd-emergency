@@ -60,7 +60,7 @@ def handled_per_pod(request_ids: set[str]) -> dict[str, int]:
     (the consumer logs one line per message: '... consumer INFO req-xxxx: matched')."""
     logs = kubectl("logs", "-l", f"app={APP}", "--prefix", "--tail=-1", "--max-log-requests=20")
     counts: dict[str, int] = {}
-    for pod, request_id in re.findall(r"^\[pod/([^/\]]+)/[^\]]+\].* (req-[0-9a-f]{16}): (?:matched|unmatched)", logs, re.M):
+    for pod, request_id in re.findall(r"^\[pod/([^/\]]+)/[^\]]+\].* (req-[0-9a-z-]+): (?:matched|unmatched)", logs, re.M):
         if request_id in request_ids:
             counts[pod] = counts.get(pod, 0) + 1
     return counts

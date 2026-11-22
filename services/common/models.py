@@ -69,14 +69,15 @@ def can_move_resource(current: str, new: str) -> bool:
     return ResourceStatus(new) in RESOURCE_TRANSITIONS[ResourceStatus(current)]
 
 
-def new_request_id() -> str:
-    """'req-' + 16 random hex characters."""
-    return "req-" + secrets.token_hex(8)
+def new_request_id(cell: str | None = None) -> str:
+    """'req-' + 16 random hex characters, or 'req-<cell>-' + 16 hex when the record belongs to a
+    geohash cell (docs/GEO_SHARDING.md): the cell is how its shard is found."""
+    return "req-" + (f"{cell}-" if cell else "") + secrets.token_hex(8)
 
 
-def new_resource_id() -> str:
-    """'res-' + 16 random hex characters."""
-    return "res-" + secrets.token_hex(8)
+def new_resource_id(cell: str | None = None) -> str:
+    """'res-' + 16 random hex characters, or 'res-<cell>-' + 16 hex (see new_request_id)."""
+    return "res-" + (f"{cell}-" if cell else "") + secrets.token_hex(8)
 
 
 def utc_now_iso() -> str:

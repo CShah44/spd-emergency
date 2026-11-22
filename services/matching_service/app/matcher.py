@@ -13,6 +13,12 @@ If step 2 fails we give the resource back, so nothing is left promised to a
 request that never got it. If the process dies between the two steps, the
 resource stays ASSIGNED to this request: the next attempt finds it again
 (_already_assigned) and finishes the job instead of grabbing a second one.
+
+Where it looks (geo-sharding, docs/GEO_SHARDING.md): records are placed by region, so
+a search near the request only needs the shards owning the request's geohash cell and
+its 8 neighbours, which together cover the 50 km limit. If that finds nobody it asks
+every shard, which is also what happens when the radius is too big for those cells to
+be sure to cover it, or when GEO_SHARDING is off.
 """
 
 import calendar
@@ -22,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from common import config, metrics
+from common import geohash
 from common.models import RequestStatus, ResourceStatus, can_move_request, utc_now_iso
 from common.sharding import RESOURCE_PREFIX, request_key, resource_key
 from common.storage_client import NotFound, StorageClient, StorageError, VersionConflict
@@ -87,7 +94,8 @@ def _match(store: StorageClient, request_id: str, max_km: float | None) -> Match
     if request["status"] == RequestStatus.UNMATCHED:  # a retry: the state machine says go via PENDING
         request = _save_request(store, request, RequestStatus.PENDING)
 
-    resource = _already_assigned(store, request_id) or _claim_nearest(store, request, max_km)
+    cells = _search_cells(request, max_km)
+    resource = _already_assigned(store, request_id, cells) or _claim_nearest(store, request, max_km, cells)
     if resource is None:
         saved = _save_request(store, request, RequestStatus.UNMATCHED)
         _observe_end_to_end(request, first_try)
@@ -117,10 +125,30 @@ def _observe_end_to_end(request: dict[str, Any], first_try: bool) -> None:
     metrics.MATCH_E2E_SECONDS.observe(max(0.0, time.time() - created))
 
 
-def _claim_nearest(store: StorageClient, request: dict[str, Any], max_km: float) -> dict[str, Any] | None:
+def _search_cells(request: dict[str, Any], max_km: float) -> list[str] | None:
+    """The geohash cells to search (the request's own and its 8 neighbours), or None to ask every shard."""
+    location = request["location"]
+    if config.GEO_SHARDING and geohash.cells_cover(location["lat"], location["lon"], max_km):
+        return geohash.cells_around(location["lat"], location["lon"])
+    return None
+
+
+def _claim_nearest(
+    store: StorageClient, request: dict[str, Any], max_km: float, cells: list[str] | None = None
+) -> dict[str, Any] | None:
     """Section 4 steps 1-5 and section 5: try the nearest candidate first and
-    claim it only if its version is still the one we read."""
-    candidates = store.query(RESOURCE_PREFIX, type=request["type"], status=ResourceStatus.AVAILABLE)
+    claim it only if its version is still the one we read. Looks in `cells` first;
+    if nobody there can be claimed, once more on every shard."""
+    claimed = _claim_from(store, request, max_km, cells)
+    if claimed is None and cells is not None:
+        claimed = _claim_from(store, request, max_km, None)
+    return claimed
+
+
+def _claim_from(
+    store: StorageClient, request: dict[str, Any], max_km: float, cells: list[str] | None
+) -> dict[str, Any] | None:
+    candidates = store.query(RESOURCE_PREFIX, cells=cells, type=request["type"], status=ResourceStatus.AVAILABLE)
     for resource in rank_candidates(request["location"], candidates, max_km):
         claimed = {
             **resource,
@@ -135,9 +163,11 @@ def _claim_nearest(store: StorageClient, request: dict[str, Any], max_km: float)
     return None
 
 
-def _already_assigned(store: StorageClient, request_id: str) -> dict[str, Any] | None:
-    """A resource a previous attempt claimed for this request before dying."""
-    found = store.query(RESOURCE_PREFIX, status=ResourceStatus.ASSIGNED, assigned_request_id=request_id)
+def _already_assigned(store: StorageClient, request_id: str, cells: list[str] | None = None) -> dict[str, Any] | None:
+    """A resource a previous attempt claimed for this request before dying. It was within the
+    search radius, so it is in the same cells. (A resource from before geo-sharding, kept on a
+    shard that does not own those cells, would be missed: only mixed old and new data can do that.)"""
+    found = store.query(RESOURCE_PREFIX, cells=cells, status=ResourceStatus.ASSIGNED, assigned_request_id=request_id)
     return found[0] if found else None
 
 
