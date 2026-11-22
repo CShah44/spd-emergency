@@ -6,3 +6,6 @@ __pycache__/
 *.db
 .env
 loadtest/results/
+node_modules/
+# the built web page (npm run build in services/ui_service/web; the Docker image builds its own)
+services/ui_service/app/static/

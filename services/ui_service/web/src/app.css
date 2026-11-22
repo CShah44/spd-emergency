@@ -1,0 +1,232 @@
+/* Delta Command: an S.P.D. ops room.
+   Gunmetal hull surfaces, one hue, lightness steps only. The five squad colors are identity,
+   not decoration: each one belongs to a part of the system (see lib/squad.js), and a request's
+   status color says whose hands it is in. Depth is borders only: shadows do not read on dark. */
+
+:root {
+  /* hull: the console surfaces, darkest at the floor */
+  --hull-0: #07090d;
+  --hull-1: #0b0f15;
+  --hull-2: #10151d;
+  --hull-3: #171d27;
+  --well: #05070a; /* inputs sit below the panel they are in */
+
+  /* seams: borders that vanish until you look for them */
+  --seam: rgba(170, 190, 225, 0.07);
+  --seam-2: rgba(170, 190, 225, 0.12);
+  --seam-3: rgba(170, 190, 225, 0.2);
+
+  /* ink: four levels of text */
+  --ink: #e8edf5;
+  --ink-2: #a8b2c3;
+  --ink-3: #6d788b;
+  --ink-4: #465063;
+
+  /* the squad */
+  --red: #ff3347;
+  --blue: #3d84ff;
+  --green: #19d27a;
+  --yellow: #ffc61a;
+  --pink: #ff4fb0;
+  /* signals that are not a squad member */
+  --cyan: #3fd0ff;
+  --orange: #ff8a2b;
+  --grey: #6f7b8f;
+
+  --shard-0: #8fa8ff;
+  --shard-1: #c4a1ff;
+  --shard-2: #6fe3cf;
+
+  --f-display: 'Chakra Petch', 'Bahnschrift', system-ui, sans-serif;
+  --f-body: 'Barlow', 'Segoe UI', system-ui, sans-serif;
+  --f-mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+
+  /* type: 1.25 from 14 */
+  --t-cap: 11px;
+  --t-sm: 12px;
+  --t-body: 14px;
+  --t-h4: 16px;
+  --t-h3: 18px;
+  --t-h2: 22px;
+  --t-h1: 28px;
+  --t-hero: 40px;
+
+  --r-1: 6px;
+  --r-2: 10px;
+  --r-3: 14px;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-move: cubic-bezier(0.77, 0, 0.175, 1);
+
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { margin: 0; background: var(--hull-0); color: var(--ink); }
+body {
+  font-family: var(--f-body);
+  font-size: var(--t-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4 { margin: 0; font-family: var(--f-display); font-weight: 600; text-wrap: balance; }
+p { margin: 0; text-wrap: pretty; }
+button, input, select, textarea { font: inherit; color: inherit; }
+a { color: inherit; }
+::selection { background: rgba(61, 132, 255, 0.35); }
+
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: var(--r-1); }
+
+.mono { font-family: var(--f-mono); font-size: 0.92em; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--ink-3); }
+.dim { color: var(--ink-2); }
+
+/* the small uppercase label used across the console */
+.label {
+  font-family: var(--f-display);
+  font-size: var(--t-cap);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* -- panels ---------------------------------------------------------------------------------- */
+
+.panel {
+  position: relative;
+  background: var(--hull-1);
+  border: 1px solid var(--seam-2);
+  border-radius: var(--r-3);
+  min-width: 0;
+}
+.panel-body { padding: 16px; }
+/* a panel that takes its row's height (the comms log beside the requests board) */
+.panel.fill { display: flex; flex-direction: column; }
+.panel.fill > .panel-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+/* a panel the briefing points at */
+.panel.spotlight { animation: spotlight 2.4s var(--ease-out); }
+@keyframes spotlight {
+  0%, 40% { box-shadow: 0 0 0 2px var(--yellow), 0 0 0 8px rgba(255, 198, 26, 0.15); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* -- buttons --------------------------------------------------------------------------------- */
+
+.btn {
+  --tone: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--seam-3);
+  background: var(--hull-2);
+  color: var(--ink);
+  font-family: var(--f-display);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-out), border-color 140ms var(--ease-out),
+    transform 120ms var(--ease-out), opacity 140ms;
+}
+.btn:hover { background: var(--hull-3); border-color: rgba(170, 190, 225, 0.3); }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.btn svg { width: 16px; height: 16px; flex: none; }
+
+/* the one primary action per surface: bright ink on the hull */
+.btn.primary { background: var(--ink); color: var(--hull-0); border-color: var(--ink); }
+.btn.primary:hover { background: #fff; }
+
+/* toned buttons: a quiet fill in the tone's color */
+.btn.tone { border-color: color-mix(in srgb, var(--tone) 45%, transparent);
+  background: color-mix(in srgb, var(--tone) 12%, var(--hull-2)); color: var(--tone); }
+.btn.tone:hover { background: color-mix(in srgb, var(--tone) 22%, var(--hull-2)); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
+.btn.ghost:hover { background: var(--hull-2); color: var(--ink); }
+.btn.sm { min-height: 30px; padding: 0 10px; font-size: 12px; }
+.btn.lg { min-height: 44px; padding: 0 18px; font-size: 14px; }
+.btn.block { width: 100%; }
+
+/* -- form controls ----------------------------------------------------------------------------- */
+
+.field { display: grid; gap: 6px; min-width: 0; }
+.input {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--seam-2);
+  background: var(--well);
+  color: var(--ink);
+  transition: border-color 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
+}
+.input::placeholder { color: var(--ink-4); }
+.input:hover { border-color: var(--seam-3); }
+.input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(61, 132, 255, 0.18); }
+input[type='number'].input { font-family: var(--f-mono); font-size: 13px; }
+
+/* -- status pills ------------------------------------------------------------------------------ */
+
+.pill {
+  --tone: var(--grey);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tone) 13%, transparent);
+  color: var(--tone);
+  font-family: var(--f-display);
+  font-size: var(--t-cap);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.pill::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.bare::before { display: none; }
+
+/* status -> color, shared by pills, bars, dots */
+.s-PENDING { --tone: var(--yellow); }
+.s-MATCHED { --tone: var(--pink); }
+.s-IN_PROGRESS { --tone: var(--cyan); }
+.s-FULFILLED { --tone: var(--green); }
+.s-UNMATCHED { --tone: var(--orange); }
+.s-CANCELLED { --tone: var(--grey); }
+.s-AVAILABLE { --tone: var(--green); }
+.s-ASSIGNED { --tone: var(--pink); }
+.s-OFFLINE { --tone: var(--grey); }
+.s-UP { --tone: var(--green); }
+.s-RECOVERING { --tone: var(--yellow); }
+.s-DOWN { --tone: var(--red); }
+
+/* a row whose record just changed */
+.flash { animation: flash 1.6s var(--ease-out); }
+@keyframes flash {
+  from { background-color: color-mix(in srgb, var(--tone, var(--yellow)) 18%, transparent); }
+  to { background-color: transparent; }
+}
+
+/* scrollbars that belong to the console */
+* { scrollbar-width: thin; scrollbar-color: var(--hull-3) transparent; }
+
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important; }
+}
