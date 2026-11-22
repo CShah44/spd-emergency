@@ -57,7 +57,8 @@ services/
   matching_service/   matcher, geo, RabbitMQ consumer, sweeper
   ui_service/         the Delta Command web page (NiceGUI)
 client/cli.py         command-line client
-k8s/                  Kubernetes manifests (apply with kustomize)
+k8s/                  Kubernetes manifests (apply with kustomize); k8s/observability/ is Prometheus + Grafana
+observability/        Prometheus config, Grafana data source and dashboard, RabbitMQ plugin list
 scripts/              seed data, demos, helpers
 tests/unit/           fast tests, no network needed
 tests/integration/    tests against a live stack
@@ -89,6 +90,8 @@ python scripts/seed.py            # registers sample responders in five cities
 | Client API and Swagger UI | http://localhost:8080 , http://localhost:8080/docs |
 | Coordinator (status of all nodes) | http://localhost:8000/internal/status |
 | RabbitMQ management UI | http://localhost:15672 (guest / guest) |
+| **Grafana dashboard** | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
 
 To run several matchers: `docker compose up -d --scale matching-service=3`.
 Stop everything with `docker compose down`.
@@ -148,6 +151,24 @@ The Pause and Resume buttons only work when `DEMO_CONTROLS=true`, which Compose 
 Kubernetes ConfigMap set. It is off by default because anyone who can reach the API could
 otherwise take storage nodes down. The page runs as a single pod (it keeps each open tab's
 state in memory).
+
+## Metrics and the Grafana dashboard
+
+Every service answers `GET /metrics` (Prometheus text format), and all metric names start with
+`spd_` (they are defined in `services/common/metrics.py`). Prometheus collects them every
+5 seconds and Grafana draws them. Open **http://localhost:3000**: the dashboard
+"S.P.D. Emergency: Delta Command" is the home page and needs no login (`admin` / `admin` to edit).
+Both the data source and the dashboard are files in `observability/grafana/`, so there is
+nothing to set up by hand, on Compose or on Kubernetes (where `k8s_up.py` loads the dashboard).
+
+Rows: cluster health, throughput (requests and matches per second), latency (p50 / p95 / p99
+from request created to answered), the queue (waiting, matchers listening, dead letters),
+replication and recovery, and the coordinator (leader and term). Queue depth comes from RabbitMQ's
+own Prometheus plugin (`observability/rabbitmq/enabled_plugins`). The storage rows fill in as
+the storage nodes and coordinator start exposing their metrics.
+
+Start measurements from `--fresh` (Kubernetes) or `docker compose down -v` (Compose): old data
+from earlier runs is matched by the sweeper and shows up as very slow requests.
 
 ## Using it
 
