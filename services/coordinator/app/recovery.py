@@ -40,6 +40,7 @@ from typing import Any
 import httpx
 
 from .registry import RECOVERING, UP, Node, Registry
+from .router import Fenced
 
 log = logging.getLogger("coordinator.recovery")
 
@@ -70,6 +71,8 @@ async def recover(
             return
         try:
             report = await _sync_pair(http, node, partner, mode)
+        except Fenced:
+            return  # we are no longer the leader: the new one handles this node
         except _NodeFailed as exc:
             registry.mark_down(exc.node.node_id, f"failed during recovery of {node_id}: {exc}")
             if exc.node.node_id == node_id:

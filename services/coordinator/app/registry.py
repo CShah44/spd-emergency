@@ -72,14 +72,23 @@ class Registry:
 
     # -- membership --------------------------------------------------------------------
 
-    def register(self, node_id: str, shard: int, role: str, url: str) -> Node:
-        """Add or re-add a node. It starts RECOVERING if its partner is UP (there
-        is something to catch up from), otherwise UP (its own data is the best
-        copy that exists)."""
+    def validate(self, shard: int, role: str) -> None:
         if not 0 <= shard < self.num_shards:
             raise RegistrationError(f"shard must be 0..{self.num_shards - 1}, got {shard}", 400)
         if role not in ROLES:
             raise RegistrationError(f"role must be one of {ROLES}, got {role!r}", 400)
+
+    def clear(self) -> None:
+        """Forget every node and leader (this coordinator stopped or started leading)."""
+        with self._lock:
+            self._nodes.clear()
+            self._leader.clear()
+
+    def register(self, node_id: str, shard: int, role: str, url: str) -> Node:
+        """Add or re-add a node. It starts RECOVERING if its partner is UP (there
+        is something to catch up from), otherwise UP (its own data is the best
+        copy that exists)."""
+        self.validate(shard, role)
         with self._lock:
             # One primary slot and one replica slot per shard. A second node
             # claiming a taken slot is a configuration mistake: refuse it loudly.
