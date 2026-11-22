@@ -53,7 +53,7 @@ services/
   storage_node/       one storage node (SQLite + API + heartbeat)
   coordinator/        registry, router, recovery (and an in-memory fake used by the unit tests)
   request_service/    client API (schemas, service rules, RabbitMQ publisher)
-  matching_service/   matcher, geo, RabbitMQ consumer
+  matching_service/   matcher, geo, RabbitMQ consumer, sweeper
 client/cli.py         command-line client
 k8s/                  Kubernetes manifests (apply with kustomize)
 scripts/              seed data, demos, helpers
@@ -92,19 +92,28 @@ Stop everything with `docker compose down`.
 
 ## Run on Kubernetes
 
-With minikube (Docker Desktop's built-in Kubernetes works the same way, without the image load step):
+Kubernetes runs through minikube, which starts a whole cluster inside one Docker container
+(Docker Desktop's built-in Kubernetes also works). One command does everything:
 
 ```
-docker compose build                          # builds the four service images the manifests use
-docker pull rabbitmq:3.13-management
-minikube start --driver=docker
-for i in storage-node coordinator request-service matching-service rabbitmq:3.13-management; do minikube image load $i; done
-kubectl apply -k k8s
-kubectl -n emergency get pods                 # wait until all are Running
-python scripts/k8s_forward.py                 # keep running: same local ports as Compose
+python scripts/k8s_up.py              # build images, start the cluster, deploy, forward ports
+python scripts/k8s_up.py --skip-build # reuse the images from last time (faster)
+python scripts/k8s_up.py --seed       # also register sample responders
+python scripts/k8s_up.py --fresh --seed   # delete all old data first: a clean demo start
 ```
 
-Stop Compose first; both use the same local ports.
+Stored data survives restarts, so demo runs pile up unless you start with `--fresh`.
+
+It checks Docker and the local ports first, waits until every pod is ready and all six
+storage nodes are `UP`, then forwards the same local ports as Docker Compose (so every
+URL, demo and test below works unchanged). Stop Compose first; both use the same ports.
+
+```
+python scripts/k8s_down.py            # stop the forward and pause the cluster; data is kept
+python scripts/k8s_down.py --wipe     # also delete the system and all its data (clean slate)
+```
+
+Useful while it runs: `kubectl -n emergency get pods`, `kubectl -n emergency logs deploy/coordinator`.
 
 ## Using it
 
@@ -138,8 +147,8 @@ Each script prints a before / during / after view.
 | Script | Shows |
 |---|---|
 | `demo_distribution.py` | Records spread across the 3 shards and copied to replicas |
-| `demo_storage_failure.py` | A storage node fails; the replica keeps serving |
-| `demo_recovery.py` | The node returns and catches up before serving again |
+| `demo_storage_failure.py` | A storage node fails; the replica keeps serving (on Kubernetes add `--method pause`) |
+| `demo_recovery.py` | The node returns and catches up before serving again (on Kubernetes add `--method pause`) |
 | `demo_matching.py` | Create, register and match: nearest responder, free responders only, release on fulfil |
 | `demo_async.py` | 40 requests at once flow through RabbitMQ; nobody is assigned twice |
 | `demo_k8s_recovery.py --app matching-service` | Delete an app pod; Kubernetes replaces it and no request is lost |
@@ -176,6 +185,9 @@ The integration tests skip themselves when no stack is reachable.
 - **Acknowledge after matching, one message at a time (prefetch 1).** A pod that dies
   mid-job returns its message to the queue. Each free pod takes the next message, so work
   spreads across pods by itself.
+- **A sweeper as a safety net.** A request is saved before it is queued, so a broker outage
+  can leave one saved but never queued. Matching is safe to repeat, so a periodic sweep
+  that matches old `PENDING` requests directly is enough, with no extra moving parts.
 - **Three attempts, then a dead-letter queue.** A message that keeps failing is parked, not
   retried forever. A storage outage does not use up an attempt, because it is not the
   message's fault.
@@ -202,19 +214,19 @@ The integration tests skip themselves when no stack is reachable.
 **Deployment**
 - **One image per service, configured by environment variables.** The same image runs in
   Compose and Kubernetes; only the settings change.
-- **Stateless app services as Deployments, storage as StatefulSets.** App pods are
-  interchangeable. Storage pods need a stable name and their own disk, so a restarted
-  node gets its data back.
+- **Stateless app services as Deployments, storage and RabbitMQ as StatefulSets.** App pods
+  are interchangeable. Storage pods and the broker need a stable name and their own disk,
+  so a restarted node gets its data back and queued messages survive a broker restart.
 - **Health probes everywhere.** Compose waits for healthy dependencies; Kubernetes only
   sends traffic to ready pods and restarts stuck ones.
 
 ## Known limitations
 
 - If RabbitMQ is down when a request is created, the request is saved as `PENDING` and the
-  client still gets `201`, but it is not queued. It can be matched with `POST /match/{id}`.
-  The proper fix (an outbox) is on the roadmap.
-- On Kubernetes, RabbitMQ keeps its data in an `emptyDir`: queued messages are lost if its
-  pod is deleted. Compose keeps them in a volume.
+  client still gets `201`, but nothing is queued. A sweeper in the matching service finds
+  requests that have been `PENDING` for over a minute (checked every 30 s) and matches them
+  directly, so such a request is matched about a minute late, not lost. Both numbers are
+  settings (`SWEEP_INTERVAL_S`, `PENDING_STALE_AFTER_S`). A full outbox is on the roadmap.
 - If freeing a responder fails after its request ends, the responder stays `ASSIGNED`
   (logged, no cleanup job yet).
 - Quantity and capacity are stored but not used by the basic matching.
