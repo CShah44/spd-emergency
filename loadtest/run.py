@@ -135,9 +135,14 @@ def match_latency(prometheus: str, window_s: int) -> dict:
     return out
 
 
+LATENCY_TOP_BUCKET_S = 120  # the biggest bucket of spd_match_e2e_seconds: anything slower is only known to be slower
+
+
 def seconds(value: float | None) -> str:
     if value is None:
         return "n/a"
+    if value >= LATENCY_TOP_BUCKET_S:
+        return f">{LATENCY_TOP_BUCKET_S} s"
     return f"{value * 1000:.0f} ms" if value < 1 else f"{value:.2f} s"
 
 
