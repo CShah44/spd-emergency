@@ -2,15 +2,19 @@
 
 import logging
 import threading
+import time
 
 import pika
 
 from common import config
-from common.messaging import EXCHANGE, PUBLISH_PROPERTIES, ROUTING_KEY, declare_topology, encode_message
+from common.messaging import (
+    DEAD_LETTER_QUEUE, EXCHANGE, PUBLISH_PROPERTIES, QUEUE, ROUTING_KEY, declare_topology, encode_message,
+)
 
 log = logging.getLogger("publisher")
 
 CONNECT_TIMEOUT_S = 2.0
+STATS_RETRY_AFTER_S = 5.0  # after a failed queue_stats(), don't try again for this long
 
 
 class PublishError(Exception):
@@ -30,6 +34,7 @@ class Publisher:
         self._lock = threading.Lock()
         self._connection: pika.BlockingConnection | None = None
         self._channel = None
+        self._stats_retry_at = 0.0
 
     def publish(self, request_id: str) -> None:
         body = encode_message(request_id)
@@ -49,6 +54,28 @@ class Publisher:
                     self._disconnect()
                     if attempt == 2 or not reused:
                         raise PublishError(f"could not publish {request_id}: {exc!r}") from exc
+
+    def queue_stats(self) -> dict[str, int] | None:
+        """How many messages wait in the queue and the dead-letter queue, and how many
+        matching services are consuming. None if RabbitMQ can't be reached.
+
+        Asked over AMQP (exact, unlike the management UI's counters, which lag a few
+        seconds). The web page polls this, so a failure is remembered for a few
+        seconds instead of making every poll wait for a connection timeout.
+        """
+        with self._lock:
+            if time.monotonic() < self._stats_retry_at:
+                return None
+            try:
+                channel = self._ready_channel()
+                main = channel.queue_declare(QUEUE, passive=True).method  # passive: only look, never create
+                dead = channel.queue_declare(DEAD_LETTER_QUEUE, passive=True).method
+                return {"waiting": main.message_count, "consumers": main.consumer_count,
+                        "dead_lettered": dead.message_count}
+            except (pika.exceptions.AMQPError, OSError):
+                self._disconnect()
+                self._stats_retry_at = time.monotonic() + STATS_RETRY_AFTER_S
+                return None
 
     def close(self) -> None:
         with self._lock:

@@ -61,6 +61,7 @@ services:
       COORDINATOR_URL: http://coordinator:8000
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       MATCHING_SERVICE_URL: http://matching-service:8000
+      DEMO_CONTROLS: "true" # the web page's Pause / Resume buttons for storage nodes
     depends_on:
       coordinator: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}

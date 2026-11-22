@@ -15,6 +15,10 @@ def _env_float(name: str, default: float) -> float:
     return float(os.environ.get(name, default))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+
 COORDINATOR_URL: str = os.environ.get("COORDINATOR_URL", "http://localhost:8000")
 STORAGE_TIMEOUT_S: float = _env_float("STORAGE_TIMEOUT_S", 5.0)
 
@@ -34,3 +38,8 @@ SWEEP_INTERVAL_S: float = _env_float("SWEEP_INTERVAL_S", 30.0)
 PENDING_STALE_AFTER_S: float = _env_float("PENDING_STALE_AFTER_S", 60.0)
 # A queue message that fails this many times goes to the dead-letter queue (DESIGN.md section 7).
 MAX_DELIVERY_ATTEMPTS: int = _env_int("MAX_DELIVERY_ATTEMPTS", 3)
+
+# The web page can pause and resume storage nodes (it simulates a failure for demos).
+# Anyone who can reach the API could do that, so it is off unless switched on:
+# docker-compose.yml and k8s/configmap.yaml turn it on for this project's demo setup.
+DEMO_CONTROLS: bool = _env_bool("DEMO_CONTROLS", False)

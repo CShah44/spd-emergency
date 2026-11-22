@@ -13,9 +13,10 @@ from typing import Any
 from fastapi import HTTPException
 
 from common.models import (
-    RequestStatus, ResourceStatus, can_move_request, can_move_resource, new_request_id, new_resource_id, utc_now_iso,
+    REQUEST_TRANSITIONS, RequestStatus, ResourceStatus, can_move_request, can_move_resource, new_request_id,
+    new_resource_id, utc_now_iso,
 )
-from common.sharding import RESOURCE_PREFIX, request_key, resource_key
+from common.sharding import REQUEST_PREFIX, RESOURCE_PREFIX, request_key, resource_key
 from common.storage_client import StorageClient, StorageError, VersionConflict
 
 from .publisher import Publisher, PublishError
@@ -27,6 +28,11 @@ log = logging.getLogger("service")
 # MATCHED with no resource, or a resource ASSIGNED to nobody.
 MATCHER_ONLY_REQUEST = {RequestStatus.MATCHED, RequestStatus.UNMATCHED}
 MATCHER_ONLY_RESOURCE = {ResourceStatus.ASSIGNED}
+
+def _is_finished(request: dict[str, Any]) -> bool:
+    """A request with no moves left (FULFILLED or CANCELLED)."""
+    return not REQUEST_TRANSITIONS[RequestStatus(request["status"])]
+
 
 SAVE_ATTEMPTS = 3  # re-reads allowed when someone else saved the same record first
 
@@ -54,6 +60,35 @@ class Service:
 
     def get_request(self, request_id: str) -> dict[str, Any]:
         return self.store.get(request_key(request_id))
+
+    def list_requests(
+        self, type: str | None, status: str | None, limit: int, active_first: bool = False
+    ) -> list[dict[str, Any]]:
+        """At most `limit` requests, for the web page's live board.
+
+        Newest first by default. With active_first, requests that can still change come
+        first (newest first) and finished ones (FULFILLED, CANCELLED) follow, most
+        recently finished first, so a request that ends drops just below the last active one.
+        The limit is applied after sorting: active requests are never pushed out by finished ones.
+        """
+        filters = {k: v for k, v in (("type", type), ("status", status)) if v is not None}
+        found = self.store.query(REQUEST_PREFIX, **filters)
+        if not active_first:
+            found.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
+            return found[:limit]
+        finished = [r for r in found if _is_finished(r)]
+        active = [r for r in found if not _is_finished(r)]
+        active.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
+        finished.sort(key=lambda r: (r["updated_at"], r["id"]), reverse=True)
+        return (active + finished)[:limit]
+
+    def request_counts(self) -> dict[str, int]:
+        """How many requests are in each status, plus the total (the page's pipeline strip)."""
+        counts = {status.value: 0 for status in RequestStatus}
+        found = self.store.query(REQUEST_PREFIX)
+        for record in found:
+            counts[record["status"]] = counts.get(record["status"], 0) + 1
+        return {**counts, "total": len(found)}
 
     def update_request_status(self, request_id: str, new: RequestStatus) -> dict[str, Any]:
         if new in MATCHER_ONLY_REQUEST:
