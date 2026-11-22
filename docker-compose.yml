@@ -61,11 +61,25 @@ services:
       COORDINATOR_URL: http://coordinator:8000
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       MATCHING_SERVICE_URL: http://matching-service:8000
+      DEMO_CONTROLS: "true" # the web page's Pause / Resume buttons for storage nodes
     depends_on:
       coordinator: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
     ports:
       - "8080:8000"
+    restart: unless-stopped
+
+  ui-service:
+    build:
+      context: .
+      dockerfile: services/ui_service/Dockerfile
+    image: ui-service
+    environment:
+      API_URL: http://request-service:8000
+    depends_on:
+      request-service: {condition: service_healthy}
+    ports:
+      - "8081:8000" # the Delta Command web page: http://localhost:8081
     restart: unless-stopped
 
   matching-service:

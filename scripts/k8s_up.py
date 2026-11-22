@@ -7,7 +7,7 @@
 
 It does what you would otherwise type by hand:
   1. check Docker, kubectl and minikube are there, and the local ports are free
-  2. build the four service images and pull RabbitMQ
+  2. build the five service images and pull RabbitMQ
   3. start minikube (a Kubernetes cluster that runs inside one Docker container)
   4. (--fresh only) delete the old system and its stored data
   5. load the images into it and `kubectl apply -k k8s`
@@ -138,6 +138,7 @@ def main() -> int:
 
     print(
         "\nS.P.D. EMERGENCY! Delta Command is online.\n"
+        "   Delta Command web page  : http://localhost:8081\n"
         "   Client API + Swagger UI : http://localhost:8080/docs\n"
         "   Coordinator status      : http://localhost:8000/internal/status\n"
         "   RabbitMQ UI             : http://localhost:15672   (guest / guest)\n"

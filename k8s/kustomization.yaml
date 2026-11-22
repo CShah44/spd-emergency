@@ -10,3 +10,4 @@ resources:
   - rabbitmq.yaml
   - request-service.yaml
   - matching-service.yaml
+  - ui-service.yaml

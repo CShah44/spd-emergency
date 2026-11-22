@@ -15,13 +15,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 NAMESPACE = "emergency"
 # Images built from this repo (docker compose build) and the one pulled from Docker Hub.
-BUILT_IMAGES = ["storage-node", "coordinator", "request-service", "matching-service"]
+BUILT_IMAGES = ["storage-node", "coordinator", "request-service", "matching-service", "ui-service"]
 RABBITMQ_IMAGE = "rabbitmq:3.13-management"
 # Everything Kubernetes keeps running for us, in the order we wait for them.
-DEPLOYMENTS = ["coordinator", "request-service", "matching-service"]
+DEPLOYMENTS = ["coordinator", "request-service", "matching-service", "ui-service"]
 STATEFULSETS = ["rabbitmq", "shard0", "shard1", "shard2"]
 # Local ports the forwarder uses (see k8s_forward.py): they must be free.
-FORWARDED_PORTS = [8000, 8080, 15672] + list(range(9001, 9007))
+FORWARDED_PORTS = [8000, 8080, 8081, 15672] + list(range(9001, 9007))
 
 PID_FILE = Path(tempfile.gettempdir()) / "spd-emergency-forward.pid"
 LOG_FILE = Path(tempfile.gettempdir()) / "spd-emergency-forward.log"
