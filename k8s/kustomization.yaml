@@ -11,3 +11,5 @@ resources:
   - request-service.yaml
   - matching-service.yaml
   - ui-service.yaml
+  - observability/prometheus.yaml
+  - observability/grafana.yaml
