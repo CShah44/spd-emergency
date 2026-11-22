@@ -2,6 +2,7 @@
 
 Two ways in, one matching function behind both:
   * RabbitMQ: a background consumer matches every new request automatically
+    (a sweeper also picks up any request that was saved but never queued)
   * POST /match/{id}: match one request right now (the request service forwards
     the client's POST /match/{id} here)
 
@@ -22,6 +23,7 @@ from common.storage_client import NotFound, StorageClient, StorageError, Storage
 
 from .consumer import Consumer
 from .matcher import match_request
+from .sweeper import Sweeper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -31,16 +33,22 @@ def create_app(store: StorageClient | None = None, consume: bool = True) -> Fast
     `consume=False` skips the RabbitMQ thread (tests, or HTTP-only use)."""
     store = store or StorageClient()
     consumer = Consumer(store)
+    sweeper = Sweeper(store)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        thread = None
+        threads = []
         if consume:
-            thread = threading.Thread(target=consumer.run, name="consumer", daemon=True)
-            thread.start()
+            threads = [
+                threading.Thread(target=consumer.run, name="consumer", daemon=True),
+                threading.Thread(target=sweeper.run, name="sweeper", daemon=True),
+            ]
+            for thread in threads:
+                thread.start()
         yield
         consumer.stop()
-        if thread:
+        sweeper.stop()
+        for thread in threads:
             thread.join(timeout=5)
         store.close()
 

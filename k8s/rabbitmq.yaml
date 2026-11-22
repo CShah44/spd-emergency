@@ -1,20 +1,23 @@
 # [B] RabbitMQ: the queue between the request service and the matching service.
 #
-# One replica, no persistent volume: the queue lives in the pod. If the pod is
-# deleted, Kubernetes starts a new one and the services reconnect by themselves
-# (the matching consumer retries every 3 s), but messages still waiting in the
-# queue at that moment are lost. Durable storage (a StatefulSet with a volume)
-# is on the roadmap, not needed for the spec demos.
+# A StatefulSet with its own disk, so messages still waiting in the queue survive
+# the pod being deleted or rescheduled. Two things make that work:
+#   * the pod is always called rabbitmq-0, and RabbitMQ names its data folder
+#     after its hostname. A Deployment's pods get a new random name each time,
+#     so a restarted broker would ignore the saved data.
+#   * volumeClaimTemplates gives the pod a volume that follows it across restarts.
+# The queue is durable and the messages are persistent (common/messaging.py), so
+# RabbitMQ writes them to that disk. Services reconnect by themselves while the
+# broker restarts (the matching consumer retries every 3 s).
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: rabbitmq
   namespace: emergency
   labels: {app: rabbitmq}
 spec:
+  serviceName: rabbitmq
   replicas: 1
-  strategy:
-    type: Recreate
   selector:
     matchLabels: {app: rabbitmq}
   template:
@@ -24,9 +27,12 @@ spec:
       containers:
         - name: rabbitmq
           image: rabbitmq:3.13-management
+          imagePullPolicy: IfNotPresent
           ports:
             - {name: amqp, containerPort: 5672}
             - {name: management, containerPort: 15672} # UI: kubectl port-forward -n emergency svc/rabbitmq 15672
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/rabbitmq}
           readinessProbe:
             exec: {command: ["rabbitmq-diagnostics", "-q", "ping"]}
             initialDelaySeconds: 10
@@ -40,6 +46,14 @@ spec:
           resources:
             requests: {cpu: 100m, memory: 256Mi}
             limits: {cpu: "1", memory: 512Mi}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
 ---
 apiVersion: v1
 kind: Service
