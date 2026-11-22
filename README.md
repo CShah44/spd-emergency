@@ -28,6 +28,7 @@ Built for the CS838 cloud course project. The shared data contract is in
 |---|---|---|
 | **Request service** | Client REST API: validates input, saves requests and resources, queues "please match this" messages | Python 3.12, FastAPI, Uvicorn, pydantic v2, httpx, pika |
 | **RabbitMQ** | Holds pending work between the two services | `rabbitmq:3.13-management`, AMQP |
+| **Web page** (`ui_service`) | Delta Command: a live dashboard and demo controls; talks to the request service over HTTP | Python 3.12, NiceGUI (no JavaScript to write) |
 | **Matching service** | Takes one message at a time and matches the request; also serves `POST /match/{id}` | Python, FastAPI, pika, httpx, a background consumer thread |
 | **Coordinator** | The only door to storage: picks the shard, writes to the leader, copies to the replica, fails over, catches nodes up | Python, FastAPI, async httpx |
 | **Storage nodes** (6) | One SQLite file each; versioned records with compare-and-set | Python, FastAPI, SQLite (WAL, `synchronous=FULL`) |
@@ -54,6 +55,7 @@ services/
   coordinator/        registry, router, recovery (and an in-memory fake used by the unit tests)
   request_service/    client API (schemas, service rules, RabbitMQ publisher)
   matching_service/   matcher, geo, RabbitMQ consumer, sweeper
+  ui_service/         the Delta Command web page (NiceGUI)
 client/cli.py         command-line client
 k8s/                  Kubernetes manifests (apply with kustomize)
 scripts/              seed data, demos, helpers
@@ -83,6 +85,7 @@ python scripts/seed.py            # registers sample responders in five cities
 
 | What | Where |
 |---|---|
+| **Delta Command web page** | http://localhost:8081 |
 | Client API and Swagger UI | http://localhost:8080 , http://localhost:8080/docs |
 | Coordinator (status of all nodes) | http://localhost:8000/internal/status |
 | RabbitMQ management UI | http://localhost:15672 (guest / guest) |
@@ -114,6 +117,37 @@ python scripts/k8s_down.py --wipe     # also delete the system and all its data 
 ```
 
 Useful while it runs: `kubectl -n emergency get pods`, `kubectl -n emergency logs deploy/coordinator`.
+
+## The Delta Command web page
+
+Open **http://localhost:8081** (Compose or Kubernetes). It refreshes by itself every second.
+From top to bottom it follows the path of a request:
+
+| Panel | What it shows |
+|---|---|
+| Storage cluster | The 3 shards and their primary and replica: state (UP, RECOVERING, DOWN), the current leader, key counts, and what a returning node copied. Each node has a **Pause** button that simulates a failure, and **Resume** to bring it back. |
+| Matching: the queue | Messages waiting, matchers connected (one per matching pod: it changes when you scale), and dead-lettered messages. Shows "RabbitMQ unreachable" if the broker is down. |
+| Matching: requests by stage | Counters for PENDING, MATCHED, IN PROGRESS and FULFILLED (plus UNMATCHED and CANCELLED) that update as requests move. |
+| What just happened | A running log: new requests, `PENDING -> MATCHED`, responders becoming `ASSIGNED`, nodes going DOWN, leaders changing. |
+| Report an emergency / Register a responder | Forms with city presets (the seed data's cities). The confirmation says which shard stored the record. |
+| Responders | Who is assigned to what: each responder's status, its shard, and the request it is serving with that request's stage. Assigned rows are highlighted. |
+| Emergency requests | Active requests first, newest on top; a request that is fulfilled or cancelled drops below the "Finished" divider. Each row has a progress bar (PENDING, MATCHED, IN PROGRESS, FULFILLED), its shard, and the action buttons that are valid for its status. |
+| Stress test | Sends 20 random requests at once, so you can watch the queue fill and drain. |
+
+**Shard chips.** Every request and responder shows `S0`, `S1` or `S2`: the shard that stores it
+(the same `sha1(key) mod 3` rule the coordinator uses). When a node of that shard is down the
+chip turns orange (`S0 !`: running on one node), and red if the shard has no live node, so a
+failure shows on every record it affects.
+
+A single match takes tens of milliseconds, so one request usually flips straight to `MATCHED`
+between two refreshes; use the stress test to see the queue work. Deleting pods and scaling
+replicas are `kubectl` actions and stay in the terminal; the "matchers connected" count shows
+their effect.
+
+The Pause and Resume buttons only work when `DEMO_CONTROLS=true`, which Compose and the
+Kubernetes ConfigMap set. It is off by default because anyone who can reach the API could
+otherwise take storage nodes down. The page runs as a single pod (it keeps each open tab's
+state in memory).
 
 ## Using it
 
@@ -217,6 +251,7 @@ The integration tests skip themselves when no stack is reachable.
 - **Stateless app services as Deployments, storage and RabbitMQ as StatefulSets.** App pods
   are interchangeable. Storage pods and the broker need a stable name and their own disk,
   so a restarted node gets its data back and queued messages survive a broker restart.
+- **The web page is its own small service, written in Python.** It uses only the public REST API (plus two read-only calls and the demo controls), so it can be removed without touching anything else. NiceGUI keeps the project single-language.
 - **Health probes everywhere.** Compose waits for healthy dependencies; Kubernetes only
   sends traffic to ready pods and restarts stuck ones.
 
