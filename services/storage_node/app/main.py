@@ -6,7 +6,13 @@
     GET    /internal/data?prefix=&f=v    search live records on THIS node
     PUT    /internal/replicate/{key}     "store exactly version N" if newer
     POST   /internal/replicate-batch     the same for many entries (recovery)
-    GET    /internal/sync?prefix=        every entry incl. tombstones (for recovery)
+    GET    /internal/sync?prefix=        every entry incl. tombstones (full-sync recovery)
+    GET    /internal/oplog/position      this node's log id + head, and its watermarks
+    GET    /internal/oplog?after=N       this node's own writes after seq N (log recovery)
+
+Client writes answer with X-Log-Id / X-Log-Seq headers: where the write sits in
+this node's log. The coordinator passes them on with the replica copy, so the
+replica can track how far it is caught up (db.py, "operation log").
     GET    /health                       identity + key count (503 while paused): readiness
     GET    /livez                        process is alive (even while paused): liveness
     POST   /admin/pause | /admin/resume  simulate a failure on demand (demos)
@@ -26,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -99,10 +105,17 @@ class NodeState:
         return {"node_id": s.node_id, "shard": s.shard_id, "role": s.role, "url": s.node_url}
 
 
+class Origin(BaseModel):
+    """Where a write sits in the log of the node that made it."""
+    log_id: str
+    seq: int = Field(ge=1)
+
+
 class ReplicatePayload(BaseModel):
     version: int = Field(ge=1)
     deleted: bool = False
     record: dict[str, Any] | None = None
+    origin: Origin | None = None
 
 
 class SyncEntry(BaseModel):
@@ -112,8 +125,20 @@ class SyncEntry(BaseModel):
     record: dict[str, Any] | None = None
 
 
+class BatchOrigin(BaseModel):
+    """The batch holds everything log <log_id> wrote up to <through>."""
+    log_id: str
+    through: int = Field(ge=0)
+
+
 class ReplicateBatch(BaseModel):
     entries: list[SyncEntry]
+    origin: BatchOrigin | None = None
+
+
+def _log_headers(response: Response, log_id: str, seq: int) -> None:
+    response.headers["X-Log-Id"] = log_id
+    response.headers["X-Log-Seq"] = str(seq)
 
 
 def _parse_if_match(value: str) -> int:
@@ -162,12 +187,15 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
     @app.put("/internal/data/{key}")
     def put_data(
         key: str,
+        response: Response,
         record: dict[str, Any] = Body(...),
         if_match: str | None = Header(default=None),
     ) -> dict[str, Any]:
         expected = None if if_match is None else _parse_if_match(if_match)
         try:
-            return store().put(key, record, expected)
+            saved, seq = store().put_logged(key, record, expected)
+            _log_headers(response, store().log_id, seq)
+            return saved
         except NotFound:
             raise HTTPException(404, detail=f"{key} not found")
         except Conflict as exc:
@@ -189,11 +217,12 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
         return record
 
     @app.delete("/internal/data/{key}")
-    def delete_data(key: str) -> dict[str, Any]:
+    def delete_data(key: str, response: Response) -> dict[str, Any]:
         try:
-            version = store().delete(key)
+            version, seq = store().delete_logged(key)
         except NotFound:
             raise HTTPException(404, detail=f"{key} not found")
+        _log_headers(response, store().log_id, seq)
         # The coordinator forwards this tombstone version to the replica.
         return {"key": key, "version": version, "deleted": True}
 
@@ -208,22 +237,37 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
     def replicate(key: str, payload: ReplicatePayload) -> dict[str, Any]:
         if not payload.deleted and payload.record is None:
             raise HTTPException(400, detail="record is required unless deleted=true")
-        applied = store().apply_replica(key, payload.version, payload.record, payload.deleted)
+        origin = None if payload.origin is None else (payload.origin.log_id, payload.origin.seq)
+        applied = store().apply_replica(key, payload.version, payload.record, payload.deleted, origin)
         # applied=False is NOT an error: we already had this version or a newer one.
         return {"key": key, "applied": applied, "version": store().version_of(key)}
 
     @app.post("/internal/replicate-batch")
     def replicate_batch(payload: ReplicateBatch) -> dict[str, Any]:
-        """Recovery: many entries in one call and one transaction, same "newer wins" rule."""
+        """Recovery: many entries in one call and one transaction, same "newer wins" rule.
+        With `origin`, also moves our watermark for that log (see db.py)."""
         for e in payload.entries:
             if not e.deleted and e.record is None:
                 raise HTTPException(400, detail=f"{e.key}: record is required unless deleted=true")
-        applied = store().apply_many([e.model_dump() for e in payload.entries])
-        return {"received": len(payload.entries), "applied": applied}
+        origin = payload.origin
+        result = store().apply_batch(
+            [e.model_dump() for e in payload.entries],
+            origin.log_id if origin else None,
+            origin.through if origin else None,
+        )
+        return {"received": len(payload.entries), **result}
 
     @app.get("/internal/sync")
     def sync(prefix: str = "") -> dict[str, Any]:
         return {"node_id": settings.node_id, "entries": store().sync_entries(prefix)}
+
+    @app.get("/internal/oplog/position")
+    def oplog_position() -> dict[str, Any]:
+        return {"node_id": settings.node_id, **store().position()}
+
+    @app.get("/internal/oplog")
+    def oplog(after: int = Query(0, ge=0), limit: int = Query(1000, ge=1, le=10_000)) -> dict[str, Any]:
+        return {"node_id": settings.node_id, **store().oplog_since(after, limit)}
 
     # -- health and demo controls ---------------------------------------------------------
 

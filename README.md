@@ -239,6 +239,11 @@ The integration tests skip themselves when no stack is reachable.
   same version.
 - **A returning node catches up before serving.** It registers as `RECOVERING`, receives
   new writes, syncs with its partner, and only then becomes `UP`.
+- **Catch-up reads an operation log, not the whole data set.** Each node numbers its own
+  writes, and each node remembers how far it has received its partner's. A returning node
+  fetches only the writes after that point, so catching up depends on how long it was gone,
+  not on how much data the shard holds (`scripts/bench_catchup.py`). If the two nodes have
+  never synced, or a disk was wiped, it falls back to comparing everything.
 - **A search that cannot reach a whole shard fails with 503** instead of returning a
   partial list. A partial "no water available" answer would wrongly mark requests
   `UNMATCHED`.

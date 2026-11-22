@@ -148,11 +148,15 @@ def test_batch_endpoint_rules(cluster):
             {"key": "a", "version": 2, "record": {"x": 1}},
             {"key": "b", "version": 1, "deleted": True},
         ]})
-        assert r.json() == {"received": 2, "applied": 2}
+        assert r.json() == {"received": 2, "applied": 2, "conflicts": 0}
         r = node.post("/internal/replicate-batch", json={"entries": [
             {"key": "a", "version": 1, "record": {"x": 0}},  # older: ignored
             {"key": "a", "version": 3, "record": {"x": 3}},
         ]})
-        assert r.json() == {"received": 2, "applied": 1}
+        assert r.json() == {"received": 2, "applied": 1, "conflicts": 0}
+        r = node.post("/internal/replicate-batch", json={"entries": [
+            {"key": "a", "version": 3, "record": {"x": "other"}},  # same version, other data
+        ]})
+        assert r.json() == {"received": 1, "applied": 0, "conflicts": 1}
         assert node.post("/internal/replicate-batch",
                          json={"entries": [{"key": "c", "version": 1}]}).status_code == 400

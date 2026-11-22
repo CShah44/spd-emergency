@@ -9,6 +9,7 @@ Run locally (with storage nodes pointing COORDINATOR_URL here):
 import asyncio
 import contextlib
 import logging
+import os
 from typing import Any, Literal
 
 import httpx
@@ -43,8 +44,14 @@ def create_app(
     sweep_interval: float = 1.0,
     node_transport: httpx.AsyncBaseTransport | None = None,
     node_timeout: float = 2.0,
+    recovery_mode: str | None = None,
 ) -> FastAPI:
-    """`node_transport` lets tests route node calls to in-process apps."""
+    """`node_transport` lets tests route node calls to in-process apps.
+    `recovery_mode`: "auto" (catch up from the operation log when possible) or
+    "full" (always compare everything; for benchmarks). Default: $RECOVERY_MODE or auto."""
+    recovery_mode = recovery_mode or os.environ.get("RECOVERY_MODE", "auto")
+    if recovery_mode not in ("auto", "full"):
+        raise ValueError(f"RECOVERY_MODE must be auto or full, got {recovery_mode!r}")
     registry = Registry(
         num_shards if num_shards is not None else config.NUM_SHARDS,
         heartbeat_timeout if heartbeat_timeout is not None else config.HEARTBEAT_TIMEOUT_S,
@@ -75,6 +82,7 @@ def create_app(
 
     app = FastAPI(title="Coordinator", lifespan=lifespan)
     app.state.registry = registry
+    app.state.recovery_mode = recovery_mode  # read at each registration, so a benchmark can switch it
 
     def router() -> Router:
         return holder["router"]
@@ -125,7 +133,9 @@ def create_app(
         if node.state == RECOVERING:
             # Catch up in the background; the node is told it's RECOVERING
             # and keeps heartbeating meanwhile.
-            task = asyncio.create_task(recover(registry, router().http, node.node_id, node.generation))
+            task = asyncio.create_task(
+                recover(registry, router().http, node.node_id, node.generation, app.state.recovery_mode)
+            )
             recoveries.add(task)  # keep a reference so the task isn't garbage-collected
             task.add_done_callback(recoveries.discard)
         return {"ok": True, "state": node.state}

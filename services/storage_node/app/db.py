@@ -20,11 +20,31 @@ Three ideas live here:
    A delete keeps the row with deleted=1 and a new version. If we removed the
    row, a partner that was down would never learn about the delete, and during
    recovery it would copy the "deleted" record back (a zombie record).
+
+4. The operation log (catch-up without comparing everything).
+   Every client write made HERE gets the next sequence number (seq) of this
+   node's log, in the same transaction as the write. The log keeps one row per
+   key: (key, seq of its latest local write). Older seqs of the same key don't
+   need keeping, because a partner that missed them only needs the newest
+   value, and the newest value is in kv.
+
+   The log has an id (log_id), made when the database file is created. A node
+   whose disk was wiped gets a new log_id, so nobody mistakes its new seq 1 for
+   the old seq 1.
+
+   For each partner log, a node remembers a WATERMARK: "I have every write of
+   that log up to seq N". Recovery then asks the partner only for its log after
+   N. The watermark only moves forward over seqs we really received (live
+   replication can arrive out of order, so later seqs wait in `_pending` until
+   the gap is filled). A missed write therefore leaves the watermark behind it,
+   and the next catch-up fetches it again: it can be too low (extra work), never
+   too high (lost data).
 """
 
 import json
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +57,27 @@ CREATE TABLE IF NOT EXISTS kv (
     version    INTEGER NOT NULL,
     updated_at TEXT    NOT NULL,
     deleted    INTEGER NOT NULL DEFAULT 0
-)
+);
+-- This node's own writes: the seq of each key's latest local write.
+CREATE TABLE IF NOT EXISTS oplog (
+    key TEXT PRIMARY KEY,
+    seq INTEGER NOT NULL UNIQUE
+);
+-- "I have every write of partner log <log_id> up to <seq>."
+CREATE TABLE IF NOT EXISTS watermarks (
+    log_id TEXT PRIMARY KEY,
+    seq    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meta (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+# Out-of-order seqs we hold while waiting for a gap to fill. If a gap never fills
+# (a write that was never replicated), we stop collecting: the watermark then
+# just stays behind, which is safe.
+MAX_PENDING = 100_000
 
 
 class NotFound(Exception):
@@ -62,8 +101,11 @@ class Store:
         # disk before we answer 200, so an acknowledged write survives a crash.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
-        self._conn.execute(SCHEMA)
+        self._conn.executescript(SCHEMA)
+        self._conn.execute("INSERT OR IGNORE INTO meta (name, value) VALUES ('log_id', ?)", (uuid.uuid4().hex,))
+        self.log_id: str = self._conn.execute("SELECT value FROM meta WHERE name = 'log_id'").fetchone()[0]
         self._lock = threading.Lock()
+        self._pending: dict[str, set[int]] = {}
 
     def close(self) -> None:
         with self._lock:
@@ -77,9 +119,15 @@ class Store:
         Returns the saved record with its new version.
         Raises NotFound (CAS on a missing or deleted key) or Conflict (version moved on).
         """
+        return self.put_logged(key, record, expected_version)[0]
+
+    def put_logged(
+        self, key: str, record: dict[str, Any], expected_version: int | None = None
+    ) -> tuple[dict[str, Any], int]:
+        """put(), also returning the write's seq in this node's log."""
         body = _encode(record)
         now = utc_now_iso()
-        with self._lock:
+        with self._lock, self._transaction():
             if expected_version is None:
                 # Upsert. Versions continue past a tombstone (v3 deleted -> v4 recreated),
                 # so "newer version wins" stays true on the replica.
@@ -114,11 +162,16 @@ class Store:
                     if current is None or current[1]:
                         raise NotFound(key)
                     raise Conflict(key, current[0])
-        return _decode(body, rows[0][0])
+            seq = self._log_write(key)
+        return _decode(body, rows[0][0]), seq
 
     def delete(self, key: str) -> int:
         """Turn the record into a tombstone. Returns the tombstone's version."""
-        with self._lock:
+        return self.delete_logged(key)[0]
+
+    def delete_logged(self, key: str) -> tuple[int, int]:
+        """delete(), returning (tombstone version, seq in this node's log)."""
+        with self._lock, self._transaction():
             rows = self._conn.execute(
                 """
                 UPDATE kv SET deleted = 1, value_json = '{}', version = version + 1, updated_at = ?
@@ -127,53 +180,64 @@ class Store:
                 """,
                 (utc_now_iso(), key),
             ).fetchall()
-        if not rows:
-            raise NotFound(key)
-        return rows[0][0]
+            if not rows:
+                raise NotFound(key)
+            seq = self._log_write(key)
+        return rows[0][0], seq
 
     # -- replica writes ------------------------------------------------------------
 
     def apply_replica(
-        self, key: str, version: int, record: dict[str, Any] | None, deleted: bool = False
+        self,
+        key: str,
+        version: int,
+        record: dict[str, Any] | None,
+        deleted: bool = False,
+        origin: tuple[str, int] | None = None,
     ) -> bool:
         """Store exactly this version, but only if it is newer than ours.
 
-        Returns True if applied, False if we already had this version or a newer one.
+        `origin` = (log_id, seq) of the write on the node that made it, so we can
+        move our watermark for that log. Returns True if applied, False if we
+        already had this version or a newer one.
         """
         entry = {"key": key, "version": version, "deleted": deleted, "record": record}
-        return self.apply_many([entry]) == 1
+        with self._lock, self._transaction():
+            applied, _ = self._apply(entry, detect_conflict=False)
+            if origin is not None:
+                self._saw_seq(*origin)
+        return applied
 
     def apply_many(self, entries: list[dict[str, Any]]) -> int:
-        """apply_replica for a whole batch in ONE transaction (fast catch-up).
+        """apply_replica for a whole batch in ONE transaction. Returns how many were applied."""
+        return self.apply_batch(entries)["applied"]
 
-        Each entry: {key, version, deleted, record}. Returns how many were applied.
+    def apply_batch(
+        self,
+        entries: list[dict[str, Any]],
+        origin_log_id: str | None = None,
+        through_seq: int | None = None,
+    ) -> dict[str, int]:
+        """Recovery: apply a batch in ONE transaction (all or nothing).
+
+        Each entry: {key, version, deleted, record}. If the batch is "everything
+        log <origin_log_id> wrote up to <through_seq>", the watermark for that
+        log moves up to through_seq in the same transaction.
+
+        Returns {"applied": n, "conflicts": n}. A conflict is the same key at the
+        same version with different data: possible only after a whole-shard
+        outage, when both nodes took writes alone. "Newer wins" can't choose, so
+        we keep ours and count it.
         """
-        applied = 0
-        with self._lock:
-            self._conn.execute("BEGIN")
-            try:
-                for e in entries:
-                    deleted = bool(e.get("deleted"))
-                    body = "{}" if deleted or e.get("record") is None else _encode(e["record"])
-                    cur = self._conn.execute(
-                        """
-                        INSERT INTO kv (key, value_json, version, updated_at, deleted)
-                        VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(key) DO UPDATE SET
-                            value_json = excluded.value_json,
-                            version    = excluded.version,
-                            updated_at = excluded.updated_at,
-                            deleted    = excluded.deleted
-                        WHERE excluded.version > kv.version
-                        """,
-                        (e["key"], body, e["version"], utc_now_iso(), int(deleted)),
-                    )
-                    applied += cur.rowcount
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")  # all or nothing
-                raise
-        return applied
+        applied = conflicts = 0
+        with self._lock, self._transaction():
+            for e in entries:
+                ok, conflict = self._apply(e, detect_conflict=True)
+                applied += ok
+                conflicts += conflict
+            if origin_log_id is not None and through_seq is not None:
+                self._raise_watermark(origin_log_id, through_seq)
+        return {"applied": applied, "conflicts": conflicts}
 
     # -- reads -----------------------------------------------------------------------
 
@@ -221,6 +285,131 @@ class Store:
     def count(self) -> int:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM kv WHERE deleted = 0").fetchone()[0]
+
+    # -- operation log -----------------------------------------------------------------
+
+    def position(self) -> dict[str, Any]:
+        """Where this node is: its own log (id + latest seq) and its watermark for
+        every partner log it has caught up with."""
+        with self._lock:
+            return {
+                "log_id": self.log_id,
+                "head": self._head(),
+                "watermarks": dict(self._conn.execute("SELECT log_id, seq FROM watermarks").fetchall()),
+            }
+
+    def oplog_since(self, after: int, limit: int = 1000) -> dict[str, Any]:
+        """This node's own writes with seq > after, oldest first, each with the
+        key's CURRENT value (tombstones included). Current, not historical: a
+        partner only needs the newest value, and "newer wins" makes it safe even
+        if the key changed again since."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT o.seq, o.key, k.value_json, k.version, k.deleted
+                FROM oplog o JOIN kv k ON k.key = o.key
+                WHERE o.seq > ? ORDER BY o.seq LIMIT ?
+                """,
+                (after, limit),
+            ).fetchall()
+            head = self._head()
+        entries = [
+            {
+                "seq": seq,
+                "key": key,
+                "version": version,
+                "deleted": bool(deleted),
+                "record": None if deleted else _decode(body, version),
+            }
+            for seq, key, body, version, deleted in rows
+        ]
+        return {"log_id": self.log_id, "head": head, "entries": entries}
+
+    # -- internals (call with self._lock held) ------------------------------------------
+
+    def _transaction(self):
+        return _Transaction(self._conn)
+
+    def _head(self) -> int:
+        return self._conn.execute("SELECT COALESCE(MAX(seq), 0) FROM oplog").fetchone()[0]
+
+    def _log_write(self, key: str) -> int:
+        """Give a local write the next seq. Same transaction as the write itself."""
+        seq = self._head() + 1
+        self._conn.execute(
+            "INSERT INTO oplog (key, seq) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET seq = excluded.seq",
+            (key, seq),
+        )
+        return seq
+
+    def _apply(self, e: dict[str, Any], detect_conflict: bool) -> tuple[bool, bool]:
+        deleted = bool(e.get("deleted"))
+        record = None if deleted else e.get("record")
+        body = "{}" if record is None else _encode(record)
+        conflict = False
+        if detect_conflict:
+            row = self._conn.execute(
+                "SELECT value_json, version, deleted FROM kv WHERE key = ?", (e["key"],)
+            ).fetchone()
+            if row is not None and row[1] == e["version"]:
+                conflict = (bool(row[2]), json.loads(row[0])) != (deleted, json.loads(body))
+        cur = self._conn.execute(
+            """
+            INSERT INTO kv (key, value_json, version, updated_at, deleted)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                version    = excluded.version,
+                updated_at = excluded.updated_at,
+                deleted    = excluded.deleted
+            WHERE excluded.version > kv.version
+            """,
+            (e["key"], body, e["version"], utc_now_iso(), int(deleted)),
+        )
+        return cur.rowcount == 1, conflict
+
+    def _watermark(self, log_id: str) -> int | None:
+        row = self._conn.execute("SELECT seq FROM watermarks WHERE log_id = ?", (log_id,)).fetchone()
+        return None if row is None else row[0]
+
+    def _saw_seq(self, log_id: str, seq: int) -> None:
+        """Live replication delivered write <seq> of <log_id>: move the watermark
+        if it closes the gap, otherwise remember it until the gap is filled."""
+        pending = self._pending.setdefault(log_id, set())
+        mark = self._watermark(log_id)
+        if mark is not None and seq <= mark:
+            return
+        if len(pending) < MAX_PENDING:
+            pending.add(seq)
+        if mark is not None:
+            self._raise_watermark(log_id, mark)
+
+    def _raise_watermark(self, log_id: str, seq: int) -> None:
+        """Watermark = max(current, seq), then absorb any pending seqs that now follow on."""
+        mark = max(self._watermark(log_id) or 0, seq)
+        pending = self._pending.setdefault(log_id, set())
+        pending.difference_update([s for s in pending if s <= mark])
+        while mark + 1 in pending:
+            mark += 1
+            pending.discard(mark)
+        self._conn.execute(
+            "INSERT INTO watermarks (log_id, seq) VALUES (?, ?) ON CONFLICT(log_id) DO UPDATE SET seq = excluded.seq",
+            (log_id, mark),
+        )
+
+
+class _Transaction:
+    """BEGIN ... COMMIT, or ROLLBACK if anything inside raises (all or nothing)."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def __enter__(self):
+        self._conn.execute("BEGIN IMMEDIATE")
+
+    def __exit__(self, exc_type, *_):
+        self._conn.execute("ROLLBACK" if exc_type else "COMMIT")
+        return False
 
 
 def _encode(record: dict[str, Any]) -> str:
