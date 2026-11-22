@@ -7,8 +7,9 @@
 #   docker compose stop storage-s0-primary          # storage failure demo
 #   docker compose up -d --scale matching-service=3 # more matchers share the queue
 #
-# Host ports: request service 8080, coordinator 8000, nodes 9001-9006 (for /health and
-# /admin/pause), RabbitMQ 5672 and its management UI 15672 (guest / guest).
+# Host ports: request service 8080, web page 8081, coordinator 8000, nodes 9001-9006 (for
+# /health and /admin/pause), RabbitMQ 5672 and its management UI 15672 (guest / guest),
+# Grafana dashboard 3000, Prometheus 9090.
 # The matching service has no host port on purpose: a fixed port would stop --scale.
 
 x-storage-node: &storage-node
@@ -45,7 +46,9 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672" # management UI: http://localhost:15672 (guest / guest)
-    volumes: [rabbitmq-data:/var/lib/rabbitmq] # queued messages survive a restart
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq # queued messages survive a restart
+      - ./observability/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro # adds the Prometheus plugin (queue depth)
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
@@ -62,6 +65,7 @@ services:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       MATCHING_SERVICE_URL: http://matching-service:8000
       DEMO_CONTROLS: "true" # the web page's Pause / Resume buttons for storage nodes
+      GEO_SHARDING: "true" # new ids carry their geohash cell (must match matching-service)
     depends_on:
       coordinator: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
@@ -76,6 +80,7 @@ services:
     image: ui-service
     environment:
       API_URL: http://request-service:8000
+      GRAFANA_URL: http://localhost:3000 # as the browser reaches it, for the Telemetry view and links
     depends_on:
       request-service: {condition: service_healthy}
     ports:
@@ -91,9 +96,34 @@ services:
       COORDINATOR_URL: http://coordinator:8000
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       MAX_MATCH_KM: "50"
+      GEO_SHARDING: "true" # look only in the request's geohash cells; "false" asks every shard (the older behaviour)
     depends_on:
       coordinator: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
+    restart: unless-stopped
+
+  # -- observability: Prometheus collects /metrics from everything, Grafana draws it ------------------
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes: [./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+    ports:
+      - "9090:9090" # http://localhost:9090
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true" # open the dashboard without logging in (read-only); admin / admin to edit
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/spd.json
+      GF_SECURITY_ALLOW_EMBEDDING: "true" # the Delta Command page shows it in its Telemetry view
+    volumes: # the data source and the dashboard are files, so there is nothing to click
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    ports:
+      - "3000:3000" # http://localhost:3000
     restart: unless-stopped
 
   # -- storage side [A] -------------------------------------------------------------------------

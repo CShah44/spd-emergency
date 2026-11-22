@@ -11,6 +11,7 @@ data:
   HEARTBEAT_INTERVAL_S: "3"
   HEARTBEAT_TIMEOUT_S: "10"
   MAX_MATCH_KM: "50"
+  GEO_SHARDING: "true" # ids carry a geohash cell and the matcher searches only nearby cells; "false" = ask every shard
   RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
   MATCHING_SERVICE_URL: "http://matching-service:8000"
   DEMO_CONTROLS: "true" # the web page's Pause / Resume buttons for storage nodes

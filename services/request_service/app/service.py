@@ -8,10 +8,12 @@ Rules enforced here:
 """
 
 import logging
+import time
 from typing import Any
 
 from fastapi import HTTPException
 
+from common import config, geohash, metrics
 from common.models import (
     REQUEST_TRANSITIONS, RequestStatus, ResourceStatus, can_move_request, can_move_resource, new_request_id,
     new_resource_id, utc_now_iso,
@@ -34,6 +36,11 @@ def _is_finished(request: dict[str, Any]) -> bool:
     return not REQUEST_TRANSITIONS[RequestStatus(request["status"])]
 
 
+def _cell_of(body: RequestCreate | ResourceCreate) -> str | None:
+    """The geohash cell that goes into the new record's id (None with GEO_SHARDING off)."""
+    return geohash.encode(body.location.lat, body.location.lon) if config.GEO_SHARDING else None
+
+
 SAVE_ATTEMPTS = 3  # re-reads allowed when someone else saved the same record first
 
 
@@ -47,14 +54,16 @@ class Service:
     def create_request(self, body: RequestCreate) -> dict[str, Any]:
         now = utc_now_iso()
         record = {
-            "id": new_request_id(),
+            "id": new_request_id(_cell_of(body)),
             **body.model_dump(mode="json"),
             "status": RequestStatus.PENDING,
             "assigned_resource_id": None,
             "created_at": now,
+            "created_ts": time.time(),  # created_at only has whole seconds; the matcher times itself against this
             "updated_at": now,
         }
         saved = self.store.put(request_key(record["id"]), record)
+        metrics.REQUESTS_CREATED.labels(type=saved["type"]).inc()
         self._enqueue(saved["id"])
         return saved
 
@@ -110,7 +119,7 @@ class Service:
     def create_resource(self, body: ResourceCreate) -> dict[str, Any]:
         now = utc_now_iso()
         record = {
-            "id": new_resource_id(),
+            "id": new_resource_id(_cell_of(body)),
             **body.model_dump(mode="json"),
             "status": ResourceStatus.AVAILABLE,
             "assigned_request_id": None,
@@ -175,4 +184,5 @@ class Service:
         try:
             self.publisher.publish(request_id)
         except PublishError as exc:
+            metrics.PUBLISH_FAILURES.inc()
             log.error("%s is saved but NOT queued: %s", request_id, exc)

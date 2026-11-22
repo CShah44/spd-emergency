@@ -23,6 +23,7 @@ from urllib.parse import quote
 import httpx
 
 from common import config
+from common.sharding import CELLS_PARAM
 
 
 class StorageError(Exception):
@@ -101,12 +102,17 @@ class StorageClient:
         """Delete one record. Raises NotFound."""
         self._send("DELETE", _path(key), key)
 
-    def query(self, prefix: str = "", **filters: Any) -> list[dict[str, Any]]:
-        """Search all shards. Filters are exact matches on top-level fields:
+    def query(self, prefix: str = "", cells: list[str] | None = None, **filters: Any) -> list[dict[str, Any]]:
+        """Search the shards. Filters are exact matches on top-level fields:
             store.query("resource:", type="water", status="AVAILABLE")
-        Result order is not guaranteed; sort it yourself.
+        With `cells` (geohash cells, docs/GEO_SHARDING.md) only the shards owning
+        those cells are asked, and only records in those cells come back, plus any
+        old-style records (no cell in their id) those shards hold. Without it,
+        every shard is asked. Result order is not guaranteed; sort it yourself.
         """
         params = {"prefix": prefix, **{k: str(v) for k, v in filters.items()}}
+        if cells:
+            params[CELLS_PARAM] = ",".join(cells)
         return self._send("GET", "/store", prefix, params=params).json()
 
     def status(self) -> dict[str, Any]:

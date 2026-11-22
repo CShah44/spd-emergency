@@ -8,6 +8,8 @@ Writes (synchronous replication):
   3. Answer the client only after both steps. If the replica can't be reached
      it is marked DOWN; the write is still safe on the primary and the replica
      catches up when it comes back (recovery). This is "degraded mode".
+  The copy also carries the write's place in the primary's operation log
+  (origin = log id + seq), so the replica knows how far it is caught up.
 
 Reads go to the acting primary, falling back to the replica.
 
@@ -28,7 +30,8 @@ from urllib.parse import quote
 
 import httpx
 
-from common.sharding import shard_for
+from common import metrics
+from common.sharding import CELLS_PARAM, parse_cells, shard_for, shards_for_cells
 
 from .registry import Node, Registry
 
@@ -50,6 +53,11 @@ class AmbiguousWrite(Exception):
     """The node may or may not have applied the write -> 503."""
 
 
+class Fenced(Exception):
+    """A storage node refused our leadership epoch: a newer coordinator leads -> 503.
+    Raised by the HTTP client's response hook (main.py), whatever the call was."""
+
+
 class NodeAnswer(Exception):
     """A normal 4xx answer from a node (404, 409, 400), passed through to the client."""
 
@@ -63,6 +71,8 @@ class Router:
     def __init__(self, registry: Registry, http: httpx.AsyncClient):
         self.registry = registry
         self.http = http
+        for shard in range(registry.num_shards):  # at 0 from the start (see main.admit)
+            metrics.REPLICATION_FAILURES.labels(str(shard))
 
     def shard_of(self, key: str) -> int:
         return shard_for(key, self.registry.num_shards)
@@ -76,7 +86,9 @@ class Router:
             shard, "PUT", _data_path(key), json=record, headers=headers, is_write=True
         )
         saved = _ok_json(resp)
-        await self._replicate(shard, key, written_on=node, payload={"version": saved["version"], "record": saved})
+        await self._replicate(
+            shard, key, written_on=node, payload={"version": saved["version"], "record": saved, **_origin(resp)}
+        )
         return saved
 
     async def get(self, key: str) -> dict[str, Any]:
@@ -88,23 +100,32 @@ class Router:
         node, resp = await self._first_live(shard, "DELETE", _data_path(key), is_write=True)
         tombstone = _ok_json(resp)
         await self._replicate(
-            shard, key, written_on=node, payload={"version": tombstone["version"], "deleted": True}
+            shard, key, written_on=node, payload={"version": tombstone["version"], "deleted": True, **_origin(resp)}
         )
 
     async def query(self, params: dict[str, str]) -> list[dict[str, Any]]:
-        """Scatter-gather: ask every shard at the same time, then merge.
+        """Scatter-gather: ask the shards at the same time, then merge.
 
-        Needed because records are spread by a hash of their key, not by type
-        or status. If any shard has no live node we fail (503) rather than
-        return a partial list: a matcher seeing "no water resources" when one
-        shard is just unreachable would wrongly mark requests UNMATCHED.
+        Without ?cells= every shard is asked: records are spread by key, not by
+        type or status. With ?cells= (geo-sharding, docs/GEO_SHARDING.md) only
+        the shards owning those cells are asked, and each returns only records
+        in them, so "free water near X" usually touches one shard.
+
+        If an asked shard has no live node we fail (503) rather than return a
+        partial list: a matcher seeing "no water resources" when one shard is
+        just unreachable would wrongly mark requests UNMATCHED.
         """
+        cells = parse_cells(params.get(CELLS_PARAM))  # ValueError -> 400 (main.py)
+        shards = range(self.registry.num_shards) if cells is None else sorted(
+            shards_for_cells(sorted(cells), self.registry.num_shards)
+        )
 
         async def one(shard: int) -> list[dict[str, Any]]:
             _, resp = await self._first_live(shard, "GET", "/internal/data", params=params, is_write=False)
             return _ok_json(resp)
 
-        per_shard = await asyncio.gather(*(one(s) for s in range(self.registry.num_shards)))
+        metrics.SHARDS_PER_QUERY.observe(len(shards))
+        per_shard = await asyncio.gather(*(one(s) for s in shards))
         return [record for records in per_shard for record in records]
 
     # -- internals ---------------------------------------------------------------------------
@@ -144,7 +165,17 @@ class Router:
             except httpx.HTTPError as exc:
                 # Don't fail the client: the write is durable on `written_on`.
                 # Marking the replica DOWN forces it to catch up before it is used again.
+                metrics.REPLICATION_FAILURES.labels(str(shard)).inc()
                 self.registry.mark_down(target.node_id, f"replication of {key} failed: {exc!r}")
+
+
+def _origin(resp: httpx.Response) -> dict[str, Any]:
+    """The write's place in the writing node's log, to send along with the replica
+    copy (storage_node/app/db.py, "operation log"). Empty if the node didn't say."""
+    log_id, seq = resp.headers.get("X-Log-Id"), resp.headers.get("X-Log-Seq")
+    if not log_id or not seq or not seq.isdigit():
+        return {}
+    return {"origin": {"log_id": log_id, "seq": int(seq)}}
 
 
 def _data_path(key: str) -> str:

@@ -1,10 +1,11 @@
 # [B] The Delta Command web page: Deployment + Service.
 #
-# ONE replica on purpose: the page keeps each open browser tab's state in this pod's
-# memory, so a second replica behind a plain Service would lose a tab's state whenever
-# its connection hopped to the other pod. It stores nothing, and Kubernetes replaces it
-# if it dies.
+# ONE replica on purpose: the pod polls the request service for every open tab and keeps
+# the "what just happened" feed in memory, so two replicas would each poll and each show a
+# different feed. It stores nothing, and Kubernetes replaces it if it dies.
 #   kubectl port-forward -n emergency svc/ui-service 8081:8000   (or: scripts/k8s_forward.py)
+# GRAFANA_URL and the other *_URL values are what the *browser* opens, so they are the
+# localhost ports scripts/k8s_forward.py forwards, not in-cluster names.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,6 +26,7 @@ spec:
           imagePullPolicy: IfNotPresent # use the image built locally by docker compose build
           env:
             - {name: API_URL, value: "http://request-service:8000"}
+            - {name: GRAFANA_URL, value: "http://localhost:3000"}
           ports:
             - containerPort: 8000
           readinessProbe:
@@ -35,8 +37,8 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           resources:
-            requests: {cpu: 50m, memory: 128Mi}
-            limits: {cpu: 500m, memory: 384Mi}
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 256Mi}
 ---
 apiVersion: v1
 kind: Service

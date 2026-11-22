@@ -6,10 +6,17 @@
     GET    /internal/data?prefix=&f=v    search live records on THIS node
     PUT    /internal/replicate/{key}     "store exactly version N" if newer
     POST   /internal/replicate-batch     the same for many entries (recovery)
-    GET    /internal/sync?prefix=        every entry incl. tombstones (for recovery)
+    GET    /internal/sync?prefix=        every entry incl. tombstones (full-sync recovery)
+    GET    /internal/oplog/position      this node's log id + head, and its watermarks
+    GET    /internal/oplog?after=N       this node's own writes after seq N (log recovery)
+
+Client writes answer with X-Log-Id / X-Log-Seq headers: where the write sits in
+this node's log. The coordinator passes them on with the replica copy, so the
+replica can track how far it is caught up (db.py, "operation log").
     GET    /health                       identity + key count (503 while paused): readiness
     GET    /livez                        process is alive (even while paused): liveness
     POST   /admin/pause | /admin/resume  simulate a failure on demand (demos)
+    GET    /metrics                      Prometheus metrics (common/metrics.py)
 
 Settings come from environment variables (see NodeSettings.from_env).
 Run locally:
@@ -26,17 +33,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from common import config
+from common import config, metrics
 from common.models import utc_now_iso
+from common.sharding import CELLS_PARAM, parse_cells
 
 from .db import Conflict, NotFound, Store
 from .heartbeat import heartbeat_loop
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+EPOCH_HEADER = "X-Coordinator-Epoch"
 
 
 @dataclass(frozen=True)
@@ -98,11 +108,34 @@ class NodeState:
         s = self.settings
         return {"node_id": s.node_id, "shard": s.shard_id, "role": s.role, "url": s.node_url}
 
+    def registration(self) -> dict[str, Any]:
+        """What we send when registering: who we are, plus how up to date our data
+        is (operation log position), so a new coordinator leader can tell which
+        node of a shard is freshest."""
+        body = self.identity()
+        if self.store is not None:
+            body["position"] = self.store.position()
+        return body
+
+    def learn_epoch(self, answer: dict[str, Any]) -> None:
+        """The coordinator's answer to register/heartbeat carries its epoch: adopt
+        it at once, so an older leader is refused from this moment on."""
+        epoch = answer.get("epoch") if isinstance(answer, dict) else None
+        if isinstance(epoch, int) and self.store is not None:
+            self.store.check_epoch(epoch)
+
+
+class Origin(BaseModel):
+    """Where a write sits in the log of the node that made it."""
+    log_id: str
+    seq: int = Field(ge=1)
+
 
 class ReplicatePayload(BaseModel):
     version: int = Field(ge=1)
     deleted: bool = False
     record: dict[str, Any] | None = None
+    origin: Origin | None = None
 
 
 class SyncEntry(BaseModel):
@@ -112,8 +145,20 @@ class SyncEntry(BaseModel):
     record: dict[str, Any] | None = None
 
 
+class BatchOrigin(BaseModel):
+    """The batch holds everything log <log_id> wrote up to <through>."""
+    log_id: str
+    through: int = Field(ge=0)
+
+
 class ReplicateBatch(BaseModel):
     entries: list[SyncEntry]
+    origin: BatchOrigin | None = None
+
+
+def _log_headers(response: Response, log_id: str, seq: int) -> None:
+    response.headers["X-Log-Id"] = log_id
+    response.headers["X-Log-Seq"] = str(seq)
 
 
 def _parse_if_match(value: str) -> int:
@@ -133,26 +178,57 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
         # Open the database at startup (not at import), so importing this
         # module never creates files.
         state.store = Store(Path(settings.data_dir) / f"{settings.node_id}.db")
-        task = asyncio.create_task(heartbeat_loop(state)) if settings.heartbeat_enabled else None
+        tasks = [asyncio.create_task(count_keys())]
+        if settings.heartbeat_enabled:
+            tasks.append(asyncio.create_task(heartbeat_loop(state)))
         yield
-        if task:
+        for task in tasks:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.gather(*tasks, return_exceptions=True)
         state.store.close()
+
+    async def count_keys(every_s: float = 5.0) -> None:
+        """spd_storage_keys, refreshed every few seconds (a COUNT per write would be waste)."""
+        keys = metrics.STORAGE_KEYS.labels(settings.node_id)
+        while True:
+            keys.set(state.store.count())
+            await asyncio.sleep(every_s)
 
     app = FastAPI(title=f"Storage node {settings.node_id}", lifespan=lifespan)
     app.state.node = state
+    metrics.instrument(app, "storage-node")  # GET /metrics (503 while paused, like everything else)
+    metrics.FENCED.labels(settings.node_id)  # at 0 from the start, so increase() sees the first one
 
     def store() -> Store:
         assert state.store is not None, "store is opened in lifespan"
         return state.store
 
     @app.middleware("http")
+    async def fence_gate(request: Request, call_next):
+        # Fencing (roadmap task 3): a coordinator sends its leadership epoch with
+        # every call. One with an OLDER epoch than we have seen is a former leader
+        # that doesn't know it was replaced (e.g. it froze): refuse it, so two
+        # coordinators can never both change our data. No header = no election
+        # (Docker Compose, tests): accepted.
+        raw = request.headers.get(EPOCH_HEADER)
+        if raw is not None and request.url.path.startswith("/internal/"):
+            if not raw.isdigit():
+                return JSONResponse({"detail": f"bad {EPOCH_HEADER}: {raw!r}"}, status_code=400)
+            known = store().check_epoch(int(raw))
+            if known is not None:
+                metrics.FENCED.labels(settings.node_id).inc()
+                return JSONResponse(
+                    {"detail": {"error": "fenced", "epoch": known, "yours": int(raw)}}, status_code=409
+                )
+        return await call_next(request)
+
+    @app.middleware("http")
     async def pause_gate(request: Request, call_next):
         # A paused node behaves like a dead one: no answers, no heartbeats.
         # /admin stays open so we can resume it, and /livez so Kubernetes
         # doesn't restart a paused pod in the middle of a demo.
+        # (Added last, so it runs first: a paused node doesn't even look at epochs.)
         if state.paused and not request.url.path.startswith(("/admin", "/livez")):
             return JSONResponse({"detail": f"{settings.node_id} is paused"}, status_code=503)
         return await call_next(request)
@@ -162,12 +238,15 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
     @app.put("/internal/data/{key}")
     def put_data(
         key: str,
+        response: Response,
         record: dict[str, Any] = Body(...),
         if_match: str | None = Header(default=None),
     ) -> dict[str, Any]:
         expected = None if if_match is None else _parse_if_match(if_match)
         try:
-            return store().put(key, record, expected)
+            saved, seq = store().put_logged(key, record, expected)
+            _log_headers(response, store().log_id, seq)
+            return saved
         except NotFound:
             raise HTTPException(404, detail=f"{key} not found")
         except Conflict as exc:
@@ -189,18 +268,25 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
         return record
 
     @app.delete("/internal/data/{key}")
-    def delete_data(key: str) -> dict[str, Any]:
+    def delete_data(key: str, response: Response) -> dict[str, Any]:
         try:
-            version = store().delete(key)
+            version, seq = store().delete_logged(key)
         except NotFound:
             raise HTTPException(404, detail=f"{key} not found")
+        _log_headers(response, store().log_id, seq)
         # The coordinator forwards this tombstone version to the replica.
         return {"key": key, "version": version, "deleted": True}
 
     @app.get("/internal/data")
     def query_data(request: Request, prefix: str = "") -> list[dict[str, Any]]:
-        filters = {k: v for k, v in request.query_params.items() if k != "prefix"}
-        return store().scan(prefix, filters)
+        """?prefix=&field=value..., and optionally ?cells=: only keys in those geohash
+        cells (plus old-style keys without a cell; common/sharding.key_in_cells)."""
+        filters = {k: v for k, v in request.query_params.items() if k not in ("prefix", CELLS_PARAM)}
+        try:
+            cells = parse_cells(request.query_params.get(CELLS_PARAM))
+        except ValueError as exc:
+            raise HTTPException(400, detail=str(exc))
+        return store().scan(prefix, filters, cells)
 
     # -- replication and recovery ---------------------------------------------------------
 
@@ -208,22 +294,37 @@ def create_app(settings: NodeSettings | None = None) -> FastAPI:
     def replicate(key: str, payload: ReplicatePayload) -> dict[str, Any]:
         if not payload.deleted and payload.record is None:
             raise HTTPException(400, detail="record is required unless deleted=true")
-        applied = store().apply_replica(key, payload.version, payload.record, payload.deleted)
+        origin = None if payload.origin is None else (payload.origin.log_id, payload.origin.seq)
+        applied = store().apply_replica(key, payload.version, payload.record, payload.deleted, origin)
         # applied=False is NOT an error: we already had this version or a newer one.
         return {"key": key, "applied": applied, "version": store().version_of(key)}
 
     @app.post("/internal/replicate-batch")
     def replicate_batch(payload: ReplicateBatch) -> dict[str, Any]:
-        """Recovery: many entries in one call and one transaction, same "newer wins" rule."""
+        """Recovery: many entries in one call and one transaction, same "newer wins" rule.
+        With `origin`, also moves our watermark for that log (see db.py)."""
         for e in payload.entries:
             if not e.deleted and e.record is None:
                 raise HTTPException(400, detail=f"{e.key}: record is required unless deleted=true")
-        applied = store().apply_many([e.model_dump() for e in payload.entries])
-        return {"received": len(payload.entries), "applied": applied}
+        origin = payload.origin
+        result = store().apply_batch(
+            [e.model_dump() for e in payload.entries],
+            origin.log_id if origin else None,
+            origin.through if origin else None,
+        )
+        return {"received": len(payload.entries), **result}
 
     @app.get("/internal/sync")
     def sync(prefix: str = "") -> dict[str, Any]:
         return {"node_id": settings.node_id, "entries": store().sync_entries(prefix)}
+
+    @app.get("/internal/oplog/position")
+    def oplog_position() -> dict[str, Any]:
+        return {"node_id": settings.node_id, **store().position()}
+
+    @app.get("/internal/oplog")
+    def oplog(after: int = Query(0, ge=0), limit: int = Query(1000, ge=1, le=10_000)) -> dict[str, Any]:
+        return {"node_id": settings.node_id, **store().oplog_since(after, limit)}
 
     # -- health and demo controls ---------------------------------------------------------
 

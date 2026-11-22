@@ -4,6 +4,7 @@ so the demo scripts work unchanged:
     coordinator  -> localhost:8000
     request-service (client API) -> localhost:8080,  web page (ui-service) -> localhost:8081,
     RabbitMQ management UI -> localhost:15672
+    Grafana dashboard -> localhost:3000,  Prometheus -> localhost:9090
     shard0-0 (s0-primary) -> 9001,  shard0-1 (s0-replica) -> 9002
     shard1-0 -> 9003, shard1-1 -> 9004, shard2-0 -> 9005, shard2-1 -> 9006
 
@@ -20,7 +21,8 @@ import time
 
 NAMESPACE = "emergency"
 FORWARDS = {"svc/coordinator": "8000:8000", "svc/request-service": "8080:8000",
-            "svc/ui-service": "8081:8000", "svc/rabbitmq": "15672:15672"}
+            "svc/ui-service": "8081:8000", "svc/rabbitmq": "15672:15672",
+            "svc/grafana": "3000:3000", "svc/prometheus": "9090:9090"}
 for i, (shard, ordinal) in enumerate((s, o) for s in range(3) for o in range(2)):
     FORWARDS[f"pod/shard{shard}-{ordinal}"] = f"{9001 + i}:9000"
 

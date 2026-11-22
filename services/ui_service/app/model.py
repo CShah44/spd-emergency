@@ -2,7 +2,7 @@
 the colors, which buttons each status gets, and the "what just happened" feed
 (found by comparing one refresh with the previous one).
 
-Kept apart from main.py so it can be tested without a browser or NiceGUI.
+Kept apart from the web code so it can be tested on its own.
 """
 
 from dataclasses import dataclass
@@ -23,13 +23,17 @@ CITIES = {
     "Ahmedabad": (23.0225, 72.5714),
 }
 
-YELLOW, BLUE, CYAN, GREEN, ORANGE, RED, GREY = "#ffcf1f", "#2f7bff", "#35d0e6", "#2ecc71", "#ff7a3b", "#ff3b3b", "#7b86a8"
+# The S.P.D. squad colors. A request's color says whose hands it is in: yellow while it waits in
+# the queue, pink once the matcher (the pink part of the system) has paired it, cyan while the
+# responder is on the way, green when done. The page's CSS (web/src/app.css) uses the same values.
+YELLOW, BLUE, CYAN, GREEN, ORANGE, RED, GREY, PINK = (
+    "#ffc61a", "#3d84ff", "#3fd0ff", "#19d27a", "#ff8a2b", "#ff3347", "#6f7b8f", "#ff4fb0")
 
 REQUEST_COLORS = {
-    RequestStatus.PENDING: YELLOW, RequestStatus.MATCHED: BLUE, RequestStatus.IN_PROGRESS: CYAN,
+    RequestStatus.PENDING: YELLOW, RequestStatus.MATCHED: PINK, RequestStatus.IN_PROGRESS: CYAN,
     RequestStatus.FULFILLED: GREEN, RequestStatus.UNMATCHED: ORANGE, RequestStatus.CANCELLED: GREY,
 }
-RESOURCE_COLORS = {ResourceStatus.AVAILABLE: GREEN, ResourceStatus.ASSIGNED: BLUE, ResourceStatus.OFFLINE: GREY}
+RESOURCE_COLORS = {ResourceStatus.AVAILABLE: GREEN, ResourceStatus.ASSIGNED: PINK, ResourceStatus.OFFLINE: GREY}
 NODE_COLORS = {"UP": GREEN, "RECOVERING": YELLOW, "DOWN": RED}
 
 
@@ -39,7 +43,7 @@ def color_of(status: str, palette: dict) -> str:
 
 # -- which shard a record lives on -----------------------------------------------------------------------
 
-SHARD_COLORS = ["#4da3ff", "#c792ff", "#5ee0b0"]  # one outline color per shard
+SHARD_COLORS = ["#8fa8ff", "#c4a1ff", "#6fe3cf"]  # one outline color per shard
 
 
 def shard_of(kind: str, record_id: str) -> int:
