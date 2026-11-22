@@ -611,8 +611,8 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Matching pods",
-      "description": "Goes up when the queue is deep (KEDA), back down when it drains.",
+      "title": "Matching pods and the queue",
+      "description": "KEDA sets the pods from the queue: about one pod for every 20 requests waiting, between 1 and 5. The queue rises first, the pods follow, then the queue drains and they go back down.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -630,8 +630,18 @@
             "uid": "prometheus"
           },
           "expr": "count(up{job=\"matching-service\"} == 1)",
-          "legendFormat": "pods",
+          "legendFormat": "matching pods",
           "refId": "A",
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rabbitmq_detailed_queue_messages_ready{queue=\"match.requests\"})",
+          "legendFormat": "requests waiting",
+          "refId": "B",
           "format": "time_series"
         }
       ],
@@ -645,7 +655,27 @@
           },
           "min": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "requests waiting"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
