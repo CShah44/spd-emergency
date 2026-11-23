@@ -1,0 +1,57 @@
+\relax 
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}System Overview}{1}{}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces The main parts of the system. Platform pieces (Kubernetes, KEDA, Prometheus, Grafana) are not drawn.}}{2}{}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:arch}{{1}{2}{}{figure.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Components and the stack each one uses.}}{2}{}\protected@file@percent }
+\newlabel{tab:components}{{1}{2}{}{table.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Data and Rules}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Statuses}{2}{}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Life of a request. Arrows are labelled with who makes the move. A request can also be set to \texttt  {CANCELLED} from any state except \texttt  {FULFILLED}.}}{3}{}\protected@file@percent }
+\newlabel{fig:status}{{2}{3}{}{figure.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Version numbers}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Application Layer}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Request service}{3}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Client REST API. Errors: invalid input is 400, unknown id 404, illegal status move 409, storage unavailable 503.}}{3}{}\protected@file@percent }
+\newlabel{tab:api}{{2}{3}{}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}RabbitMQ}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Matching service}{4}{}\protected@file@percent }
+\newlabel{sec:matcher}{{4.3}{4}{}{subsection.4.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Steps the matching service takes for one request.}}{4}{}\protected@file@percent }
+\newlabel{fig:match}{{3}{4}{}{figure.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{Choosing a resource.}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Two matchers, one resource.}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Order of the two updates.}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Sweeper.}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Web page (Delta Command)}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}Command-line client}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Storage Layer}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Coordinator}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Storage nodes and replication}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Failure and recovery}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Operation log.}{5}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Catch-up by operation log and by full comparison. Single runs on a laptop.}}{6}{}\protected@file@percent }
+\newlabel{tab:catchup}{{3}{6}{}{table.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Sharding by location}{6}{}\protected@file@percent }
+\newlabel{sec:geo}{{5.4}{6}{}{subsection.5.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Two coordinators and fencing}{6}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Coordinator failure during continuous writes.}}{7}{}\protected@file@percent }
+\newlabel{tab:failover}{{4}{7}{}{table.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Platform Layer}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Docker and Docker Compose}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Kubernetes}{7}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces What runs on Kubernetes (namespace \texttt  {emergency}).}}{7}{}\protected@file@percent }
+\newlabel{tab:k8s}{{5}{7}{}{table.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}Autoscaling with KEDA}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Metrics and dashboard}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Testing and Results}{8}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Tests}{8}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Load and failure tests}{8}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Final system under load and failures. ``Lost / double'' is the number of lost requests and of resources given to two requests.}}{8}{}\protected@file@percent }
+\newlabel{tab:load}{{6}{8}{}{table.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Baseline and final system}{8}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Baseline and final system.}}{9}{}\protected@file@percent }
+\newlabel{tab:before}{{7}{9}{}{table.7}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}Summary}{9}{}\protected@file@percent }
+\gdef \@abspage@last{9}
